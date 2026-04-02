@@ -15,9 +15,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from tools.chart import generate_car_chart
+from tools.event_collector import collect_event_records
 from tools.event_study import run_event_study
+from tools.expectation_analysis import analyze_expectation_vs_actual
+from tools.heat_analysis import scan_event_heat
 from tools.news_scraper import fetch_article_content, search_news
-from tools.report import save_event_record, save_report
+from tools.report import build_event_report_payload, save_event_record, save_report
+from tools.schemas import build_comparison_strategy
 from tools.stock_data import fetch_stock_data
 
 # ---------------------------------------------------------------------------
@@ -559,3 +563,213 @@ def news_scan(query: str, days: int = 30) -> str:
     print()
 
     return _run_news_scan_gemini(query, days, system_prompt)
+
+
+def event_collect(
+    stock: str,
+    event_type: str,
+    start_date: str,
+    end_date: str,
+    stock_name: str = "",
+    event_date: str = "",
+    event_key: str = "",
+    max_results: int = 12,
+) -> str:
+    """Collect structured event-oriented records and save them as JSON.
+
+    Args:
+        stock: Yahoo Finance symbol or Taiwan stock code, e.g. '2330.TW' or '2330'
+        event_type: Event label, e.g. '法說會'
+        start_date: Collection start date YYYY-MM-DD
+        end_date: Collection end date YYYY-MM-DD
+        stock_name: Optional Chinese stock name for query expansion
+        event_date: Optional specific event date YYYY-MM-DD
+        event_key: Optional recurring event key, e.g. '2025Q4' for earnings-call comparisons
+        max_results: Maximum number of records to save
+
+    Returns:
+        Path to the saved JSON record file.
+    """
+    print(f"[agent] mode: event_collect")
+    print(f"[agent] stock: {stock}")
+    print(f"[agent] event type: {event_type}")
+    print(f"[agent] range: {start_date} -> {end_date}")
+    if event_date:
+        print(f"[agent] event date: {event_date}")
+    if event_key:
+        print(f"[agent] event key: {event_key}")
+    print()
+
+    payload = collect_event_records(
+        symbol=stock,
+        event_type=event_type,
+        start_date=start_date,
+        end_date=end_date,
+        stock_name=stock_name,
+        event_date=event_date,
+        event_key=event_key,
+        max_results=max_results,
+    )
+    topic = f"{payload['query']['stock']['code'] or stock}_{event_type}"
+    return save_event_record(payload, topic=topic)
+
+
+def heat_scan(
+    stock: str,
+    event_type: str,
+    event_date: str,
+    stock_name: str = "",
+    event_key: str = "",
+    comparison_event_date: str = "",
+    max_results: int = 24,
+) -> str:
+    """Run structured heat analysis and save it as JSON."""
+    print(f"[agent] mode: heat_scan")
+    print(f"[agent] stock: {stock}")
+    print(f"[agent] event type: {event_type}")
+    print(f"[agent] event date: {event_date}")
+    if event_key:
+        print(f"[agent] event key: {event_key}")
+    if comparison_event_date:
+        print(f"[agent] comparison event date: {comparison_event_date}")
+    print()
+
+    payload = scan_event_heat(
+        symbol=stock,
+        event_type=event_type,
+        event_date=event_date,
+        stock_name=stock_name,
+        event_key=event_key,
+        comparison_event_date=comparison_event_date,
+        max_results=max_results,
+    )
+    topic = f"{payload['stock']['code'] or stock}_{event_type}_heat"
+    return save_event_record(payload, topic=topic)
+
+
+def event_report(
+    stock: str,
+    event_type: str,
+    start_date: str,
+    end_date: str,
+    event_date: str,
+    stock_name: str = "",
+    event_key: str = "",
+    comparison_event_date: str = "",
+    max_results: int = 24,
+    include_event_study: bool = False,
+    topic: str = "",
+) -> dict[str, str]:
+    """Build and save an integrated event report in JSON and Markdown."""
+    print(f"[agent] mode: event_report")
+    print(f"[agent] stock: {stock}")
+    print(f"[agent] event type: {event_type}")
+    print(f"[agent] range: {start_date} -> {end_date}")
+    print(f"[agent] event date: {event_date}")
+    if event_key:
+        print(f"[agent] event key: {event_key}")
+    if comparison_event_date:
+        print(f"[agent] comparison event date: {comparison_event_date}")
+    print(f"[agent] include event study: {include_event_study}")
+    print()
+
+    event_collection = collect_event_records(
+        symbol=stock,
+        event_type=event_type,
+        start_date=start_date,
+        end_date=end_date,
+        stock_name=stock_name,
+        event_date=event_date,
+        event_key=event_key,
+        max_results=max_results,
+    )
+    heat_payload = scan_event_heat(
+        symbol=stock,
+        event_type=event_type,
+        event_date=event_date,
+        stock_name=stock_name,
+        event_key=event_key,
+        comparison_event_date=comparison_event_date,
+        max_results=max_results,
+    )
+    expectation_payload = _build_expectation_payload(
+        records=event_collection["records"],
+        event_type=event_type,
+        event_key=event_collection["query"].get("event_key", ""),
+    )
+    event_study_payload = (
+        _build_event_study_payload(stock=stock, event_date=event_date, end_date=end_date)
+        if include_event_study
+        else None
+    )
+
+    report_payload = build_event_report_payload(
+        event_collection=event_collection,
+        heat_analysis=heat_payload,
+        expectation_analysis=expectation_payload,
+        event_study=event_study_payload,
+        title=topic or event_collection["query"]["stock"].get("name") or event_type,
+    )
+    safe_topic = topic or f"{event_collection['query']['stock']['code'] or stock}_{event_type}_event_report"
+    json_path = save_event_record(report_payload, topic=safe_topic)
+    markdown_path = save_report(report_payload["markdown"], topic=safe_topic)
+    return {
+        "json_path": json_path,
+        "markdown_path": markdown_path,
+    }
+
+
+def _build_expectation_payload(records: list[dict[str, Any]], event_type: str, event_key: str) -> dict[str, Any]:
+    """Run expectation analysis when the event supports it; otherwise return structured gaps."""
+    strategy = build_comparison_strategy(event_type=event_type, event_key=event_key)
+    if strategy["comparison_mode"] != "same_event_last_year":
+        return {
+            "analysis_target": {
+                "event_type": event_type,
+                "event_key": event_key,
+            },
+            "comparison_mode": "expectation_vs_actual",
+            "metrics": [],
+            "status_counts": {},
+            "data_gaps": ["expectation_analysis_only_supported_for_recurring_events"],
+        }
+    if not event_key:
+        return {
+            "analysis_target": {
+                "event_type": event_type,
+                "event_key": event_key,
+            },
+            "comparison_mode": "expectation_vs_actual",
+            "metrics": [],
+            "status_counts": {},
+            "data_gaps": ["event_key_missing_for_expectation_analysis"],
+        }
+    return analyze_expectation_vs_actual(records=records, event_key=event_key, event_type=event_type)
+
+
+def _build_event_study_payload(stock: str, event_date: str, end_date: str) -> dict[str, Any]:
+    """Run deterministic event study for a single event date."""
+    price_data = fetch_stock_data(symbol=stock, start_date=event_date, end_date=end_date)
+    result = run_event_study(
+        stock_returns=price_data["stock_returns"],
+        market_returns=price_data["market_returns"],
+        dates=price_data["dates"],
+        event_dates=[event_date],
+    )
+    full_window_car = result["avg_car"][-1] if result.get("avg_car") else 0.0
+    summary = (
+        f"事件研究完成，單一事件樣本 {result.get('n_events', 0)} 筆，"
+        f"[-5,+5] CAR {full_window_car:.4f}"
+    )
+    data_gaps = []
+    if result.get("error"):
+        data_gaps.append(result["error"])
+    if result.get("skipped_events"):
+        data_gaps.append("some_events_skipped")
+
+    return {
+        **result,
+        "summary": summary,
+        "n_skipped": len(result.get("skipped_events", [])),
+        "data_gaps": data_gaps,
+    }

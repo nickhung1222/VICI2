@@ -1,6 +1,21 @@
 """CLI entry point for VICI2 Taiwan News Event Study Agent.
 
 Usage:
+    # Event collect mode
+    python main.py --mode event_collect --stock 2330.TW \
+        --event-type 法說會 --start-date 2025-04-01 --end-date 2025-04-17 \
+        --stock-name 台積電 --event-date 2025-04-17 --event-key 2025Q1
+
+    # Heat scan mode
+    python main.py --mode heat_scan --stock 2330.TW \
+        --event-type 法說會 --event-date 2025-04-17 --event-key 2025Q1 \
+        --stock-name 台積電
+
+    # Event report mode
+    python main.py --mode event_report --stock 2330.TW \
+        --event-type 法說會 --start-date 2025-04-01 --end-date 2025-04-18 \
+        --event-date 2025-04-17 --event-key 2025Q1 --stock-name 台積電
+
     # Event Study mode
     python main.py --mode event_study --stock 2330.TW \\
         --event-dates 2025-01-16,2025-04-17 --topic "TSMC法說會"
@@ -26,8 +41,22 @@ def main():
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["event_study", "news_scan"],
+        choices=["event_collect", "heat_scan", "event_report", "event_study", "news_scan"],
         help="Operation mode",
+    )
+    # event_collect args
+    parser.add_argument("--event-type", help="Structured event type, e.g. '法說會' (required for event_collect)")
+    parser.add_argument("--start-date", help="Collection start date YYYY-MM-DD (required for event_collect)")
+    parser.add_argument("--end-date", help="Collection end date YYYY-MM-DD (required for event_collect)")
+    parser.add_argument("--event-date", help="Specific event date YYYY-MM-DD (optional for event_collect)")
+    parser.add_argument("--event-key", help="Recurring event key, e.g. '2025Q4' for 法說會")
+    parser.add_argument("--comparison-event-date", help="Explicit prior comparable event date YYYY-MM-DD for heat_scan")
+    parser.add_argument("--stock-name", default="", help="Chinese stock name for query expansion")
+    parser.add_argument("--max-results", type=int, default=12, help="Maximum collected records for event_collect")
+    parser.add_argument(
+        "--include-event-study",
+        action="store_true",
+        help="Include deterministic event study output in event_report",
     )
     # event_study args
     parser.add_argument("--stock", help="Yahoo Finance symbol, e.g. '2330.TW' (required for event_study)")
@@ -39,9 +68,78 @@ def main():
 
     args = parser.parse_args()
 
-    from agent import event_study, news_scan
+    from agent import event_collect, event_report, event_study, heat_scan, news_scan
 
-    if args.mode == "event_study":
+    if args.mode == "event_collect":
+        if not args.stock:
+            parser.error("--stock is required for event_collect mode")
+        if not args.event_type:
+            parser.error("--event-type is required for event_collect mode")
+        if not args.start_date:
+            parser.error("--start-date is required for event_collect mode")
+        if not args.end_date:
+            parser.error("--end-date is required for event_collect mode")
+
+        output_path = event_collect(
+            stock=args.stock,
+            event_type=args.event_type,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            stock_name=args.stock_name,
+            event_date=args.event_date or "",
+            event_key=args.event_key or "",
+            max_results=args.max_results,
+        )
+        print(f"\n✓ Event records saved: {output_path}")
+
+    elif args.mode == "heat_scan":
+        if not args.stock:
+            parser.error("--stock is required for heat_scan mode")
+        if not args.event_type:
+            parser.error("--event-type is required for heat_scan mode")
+        if not args.event_date:
+            parser.error("--event-date is required for heat_scan mode")
+
+        output_path = heat_scan(
+            stock=args.stock,
+            event_type=args.event_type,
+            event_date=args.event_date,
+            stock_name=args.stock_name,
+            event_key=args.event_key or "",
+            comparison_event_date=args.comparison_event_date or "",
+            max_results=args.max_results,
+        )
+        print(f"\n✓ Heat analysis saved: {output_path}")
+
+    elif args.mode == "event_report":
+        if not args.stock:
+            parser.error("--stock is required for event_report mode")
+        if not args.event_type:
+            parser.error("--event-type is required for event_report mode")
+        if not args.start_date:
+            parser.error("--start-date is required for event_report mode")
+        if not args.end_date:
+            parser.error("--end-date is required for event_report mode")
+        if not args.event_date:
+            parser.error("--event-date is required for event_report mode")
+
+        output_paths = event_report(
+            stock=args.stock,
+            event_type=args.event_type,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            event_date=args.event_date,
+            stock_name=args.stock_name,
+            event_key=args.event_key or "",
+            comparison_event_date=args.comparison_event_date or "",
+            max_results=args.max_results,
+            include_event_study=args.include_event_study,
+            topic=args.topic,
+        )
+        print(f"\n✓ Event report JSON saved: {output_paths['json_path']}")
+        print(f"✓ Event report Markdown saved: {output_paths['markdown_path']}")
+
+    elif args.mode == "event_study":
         if not args.stock:
             parser.error("--stock is required for event_study mode")
         if not args.event_dates:
