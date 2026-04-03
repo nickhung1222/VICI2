@@ -75,7 +75,13 @@ def test_collect_event_records_returns_structured_payload(monkeypatch):
     monkeypatch.setattr("tools.event_collector.fetch_article_content", fake_fetch_article_content)
     monkeypatch.setattr(
         "tools.event_collector.collect_official_event_records",
-        lambda **kwargs: {"records": [], "data_gaps": []},
+        lambda **kwargs: {
+            "records": [],
+            "data_gaps": [],
+            "official_artifacts": [],
+            "earnings_digest": {},
+            "todo_items": [],
+        },
     )
 
     payload = collect_event_records(
@@ -104,6 +110,8 @@ def test_collect_event_records_returns_structured_payload(monkeypatch):
     assert payload["records"][0]["summary"].startswith("Q1 營收與毛利率展望")
     assert payload["data_completeness"]["official_sources_included"] is False
     assert payload["record_breakdown"]["archive_records"] >= 1
+    assert payload["official_artifacts"] == []
+    assert payload["todo_items"] == []
 
 
 def test_collect_event_records_clamps_pre_event_report_window(monkeypatch):
@@ -120,7 +128,13 @@ def test_collect_event_records_clamps_pre_event_report_window(monkeypatch):
     monkeypatch.setattr("tools.event_collector.fetch_article_content", lambda **kwargs: "")
     monkeypatch.setattr(
         "tools.event_collector.collect_official_event_records",
-        lambda **kwargs: {"records": [], "data_gaps": []},
+        lambda **kwargs: {
+            "records": [],
+            "data_gaps": [],
+            "official_artifacts": [],
+            "earnings_digest": {},
+            "todo_items": [],
+        },
     )
 
     collect_event_records(
@@ -155,7 +169,13 @@ def test_collect_event_records_reports_no_news_for_strict_goodinfo_only(monkeypa
     monkeypatch.setattr("tools.event_collector.fetch_article_content", lambda **kwargs: "")
     monkeypatch.setattr(
         "tools.event_collector.collect_official_event_records",
-        lambda **kwargs: {"records": [], "data_gaps": []},
+        lambda **kwargs: {
+            "records": [],
+            "data_gaps": [],
+            "official_artifacts": [],
+            "earnings_digest": {},
+            "todo_items": [],
+        },
     )
 
     payload = collect_event_records(
@@ -175,6 +195,7 @@ def test_collect_event_records_reports_no_news_for_strict_goodinfo_only(monkeypa
     assert payload["record_count"] == 0
     assert "no_news_in_interval" in payload["data_completeness"]["data_gaps"]
     assert "該區間沒有新聞" in payload["data_completeness"]["notes"]
+    assert payload["todo_items"][0]["id"] == "no_news_in_interval"
 
 
 def test_collect_event_records_includes_official_sources(monkeypatch):
@@ -208,6 +229,31 @@ def test_collect_event_records_includes_official_sources(monkeypatch):
                 }
             ],
             "data_gaps": [],
+            "official_artifacts": [
+                {
+                    "artifact_type": "mops_notice",
+                    "source_name": "公開資訊觀測站",
+                    "url": "https://mopsov.twse.com.tw/mops/web/t100sb07_1",
+                    "retrieval_status": "ok",
+                    "validation_status": "validated",
+                    "excerpt": "官方法說會資訊",
+                }
+            ],
+            "earnings_digest": {
+                "financial_snapshot": {
+                    "gross_margin": {
+                        "value_low": 58.0,
+                        "value_high": 58.0,
+                        "unit": "%",
+                        "evidence_span": "gross margin 58%",
+                        "source_ref": "https://mopsov.twse.com.tw/mops/web/t100sb07_1",
+                        "source_artifact_type": "mops_notice",
+                        "source_name": "公開資訊觀測站",
+                        "validation_status": "validated",
+                    }
+                }
+            },
+            "todo_items": [],
         },
     )
 
@@ -226,3 +272,5 @@ def test_collect_event_records_includes_official_sources(monkeypatch):
     assert payload["records"][0]["source_type"] == "official"
     assert payload["data_completeness"]["official_sources_included"] is True
     assert payload["collection_plan"]["sources"][0] == "mops"
+    assert payload["official_artifacts"][0]["artifact_type"] == "mops_notice"
+    assert payload["earnings_digest"]["financial_snapshot"]["gross_margin"]["validation_status"] == "validated"

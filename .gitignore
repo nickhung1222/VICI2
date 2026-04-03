@@ -17,6 +17,7 @@ env/
 
 # Temp files
 tmp/
+.playwright-cli/
 *.pdf
 
 # Outputs

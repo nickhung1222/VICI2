@@ -33,6 +33,53 @@ def _make_event_collection():
                 "comparison_event_key": "2024Q1",
             },
         },
+        "official_artifacts": [
+            {
+                "artifact_type": "transcript",
+                "source_name": "TSMC IR",
+                "url": "https://investor.example.com/transcript.pdf",
+                "validation_status": "validated",
+                "retrieval_status": "ok",
+                "excerpt": "We remain confident about AI demand.",
+            }
+        ],
+        "earnings_digest": {
+            "financial_snapshot": {
+                "gross_margin": {
+                    "value_low": 58.0,
+                    "value_high": 58.0,
+                    "unit": "%",
+                    "evidence_span": "gross margin 58%",
+                    "source_ref": "https://investor.example.com/transcript.pdf",
+                    "source_artifact_type": "transcript",
+                    "source_name": "TSMC IR",
+                    "validation_status": "validated",
+                }
+            },
+            "management_tone": {
+                "label": "bullish",
+                "validation_status": "validated",
+                "evidence": [
+                    {
+                        "excerpt": "We remain confident about AI demand.",
+                        "source_ref": "https://investor.example.com/transcript.pdf",
+                        "source_artifact_type": "transcript",
+                    }
+                ],
+            },
+            "qa_topics": [
+                {
+                    "topic": "capex",
+                    "question_summary": "Q: 今年 capex 是否上修？",
+                    "answer_summary": "A: 今年資本支出維持高檔。",
+                    "source_ref": "https://investor.example.com/transcript.pdf",
+                }
+            ],
+            "official_takeaways": ["公布 2025Q1 財報與展望。"],
+            "data_gaps": [],
+        },
+        "todo_items": [],
+        "data_gaps": [],
         "record_count": 2,
         "records": [
             {"headline": "台積電法說會前市場預期", "article_type": "法說前預期"},
@@ -125,11 +172,17 @@ def test_build_event_report_payload_assembles_sections():
     assert payload["sections"]["event_summary"]["record_count"] == 2
     assert payload["sections"]["heat_analysis"]["news_heat_label"] == "高"
     assert "## 一、事件摘要" in payload["markdown"]
-    assert "## 五、熱度分析" in payload["markdown"]
-    assert "## 六、事件研究（可選）" in payload["markdown"]
+    assert "## 二、官方來源清單" in payload["markdown"]
+    assert "## 三、法說重點" in payload["markdown"]
+    assert "## 四、管理層態度" in payload["markdown"]
+    assert "## 五、Q&A 摘要" in payload["markdown"]
+    assert "## 九、熱度分析" in payload["markdown"]
+    assert "## 十、事件研究（可選）" in payload["markdown"]
     assert "市場反應日（t=0）" in payload["markdown"]
     assert "beat" in payload["markdown"]
     assert "56%" in payload["markdown"]
+    assert "gross margin 58%" in payload["markdown"]
+    assert "id=" not in payload["markdown"]
 
 
 def test_build_event_report_payload_marks_missing_heat_analysis():
@@ -167,7 +220,7 @@ def test_render_event_report_markdown_uses_structured_sections():
 
     markdown = render_event_report_markdown(payload["metadata"], payload["sections"])
     assert markdown.startswith("# 台積電 事件報告")
-    assert "## 七、資料缺口與限制" in markdown
+    assert "## 十一、資料缺口與限制" in markdown
 
 
 def test_build_event_report_payload_accepts_metric_based_expectation_analysis():
@@ -203,6 +256,34 @@ def test_build_event_report_payload_accepts_metric_based_expectation_analysis():
     assert "57.0 ~ 59.0 %" in markdown
     assert "58.0 %" in markdown
     assert "matched: 1；unknown: 1" in markdown
+
+
+def test_build_event_report_payload_renders_todo_items():
+    event_collection = _make_event_collection()
+    event_collection["todo_items"] = [
+        {
+            "id": "transcript_missing",
+            "priority": "blocking",
+            "reason": "No official transcript was found for this earnings call.",
+            "next_action": "Fallback to presentation and earnings release for summary fields.",
+            "source_context": "earnings_digest.qa_topics",
+        }
+    ]
+    event_collection["data_gaps"] = ["transcript_missing", "qa_not_available"]
+    event_collection["earnings_digest"]["qa_topics"] = []
+    event_collection["earnings_digest"]["data_gaps"] = ["qa_not_available"]
+
+    payload = build_event_report_payload(
+        event_collection=event_collection,
+        heat_analysis=_make_heat_analysis(),
+        expectation_analysis=_make_expectation_analysis(),
+        generated_at="2026-04-02 09:30:00",
+    )
+
+    markdown = payload["markdown"]
+    assert "## 十二、待辦事項" in markdown
+    assert "transcript_missing" in markdown
+    assert "qa_not_available" in payload["data_gaps"]
 
 
 def test_build_event_study_payload_extends_price_window_for_post_event_days():

@@ -45,6 +45,8 @@ Preferred commit message style: concise English messages such as `feat: add even
 
 VICI2 是一個台灣財經新聞事件研究 Agent，以 LLM 作為 Orchestrator，自動執行：
 - 結構化事件蒐集（event-first collector，第一階段重構）
+- 法說會官方來源蒐集（MOPS + IR artifacts）
+- 法說會 verified digest（`official_artifacts` / `earnings_digest` / `todo_items`）
 - 新聞抓取（法說會目前優先使用 Goodinfo 個股日期索引；其他事件仍可用 Cnyes、Google News RSS、yfinance）
 - 獨立 Cnyes 個股新聞區間查詢（`tools/cnyes_stock_news.py`，不接入主流程）
 - 中文情緒分析（看多 / 看空 / 中性）
@@ -63,6 +65,8 @@ VICI2/
 ├── main.py           # CLI 入口
 ├── tools/            # 各功能模組
 │   ├── event_collector.py # 結構化事件蒐集（Phase 1）
+│   ├── event_sources.py   # 法說會官方來源、artifact 發現與 digest
+│   ├── earnings_validation.py # 法說會固定 gold sample 與 regression summary helper
 │   ├── cnyes_stock_news.py # 獨立 Cnyes 個股新聞區間查詢
 │   ├── schemas.py        # schema 與 normalization helper
 │   ├── news_scraper.py   # 新聞抓取
@@ -90,6 +94,7 @@ VICI2/
 | 股價資料 | `yfinance` |
 | 數值計算 | `pandas`, `numpy`, `scipy` |
 | 網頁抓取 | `requests`, `beautifulsoup4`, `lxml`, Playwright CLI fallback |
+| PDF 抽取 | `pypdf`, `pdfplumber` |
 | 圖表 | `matplotlib` |
 | 環境變數 | `python-dotenv` |
 | 測試 | `pytest` |
@@ -147,8 +152,9 @@ GEMINI_MODEL=gemini-2.0-flash
 ### Event Collect 模式（第一階段重構）
 1. `event_collect()` 呼叫 `tools/event_collector.py`
 2. 將股票、事件類型、日期範圍正規化為 collection plan
-3. 透過現有新聞來源收集結構化 event/news records
-4. 使用 `save_event_record()` 輸出 JSON 到 `outputs/events/`
+3. 對 `法說會` 先走 `tools/event_sources.py` 收集 MOPS record、IR artifacts、verified digest 與 todo
+4. 再透過現有新聞來源收集結構化 event/news records
+5. 使用 `save_event_record()` 輸出 JSON 到 `outputs/events/`
 
 ### Event Study 模式（7 步驟）
 1. `scrape_news` — 搜尋事件主題相關新聞
@@ -177,6 +183,12 @@ GEMINI_MODEL=gemini-2.0-flash
 ### `tools/event_collector.py`
 - `collect_event_records(...)` — 以事件導向輸入建立結構化事件紀錄
 - `build_collection_queries(...)` — 將股票標的與事件類型轉成 event-first query plan
+- 對 `法說會` 額外輸出 `official_artifacts`、`earnings_digest`、`todo_items`
+
+### `tools/event_sources.py`
+- `fetch_mops_investor_conference(...)` — 取得法說會官方日期、摘要與官方頁連結
+- `collect_official_event_records(...)` — 組裝 MOPS record + IR artifacts + verified digest + todo
+- 只保留帶 `evidence/source_ref` 的 verified metrics、management tone、Q&A
 
 ### `tools/schemas.py`
 - `normalize_symbol(...)` — 將股票代碼正規化為 Yahoo Finance 樣式

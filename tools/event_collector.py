@@ -178,6 +178,10 @@ def collect_event_records(
     final_data_gaps = _merge_data_gaps(comparison_strategy["data_gaps"], official_payload["data_gaps"], archive_data_gaps)
     if not records and primary_source == "goodinfo" and not allow_secondary_sources and "no_news_in_interval" not in final_data_gaps:
         final_data_gaps.append("no_news_in_interval")
+    todo_items = _merge_todo_items(
+        official_payload.get("todo_items", []),
+        _build_todo_items_from_gaps(final_data_gaps),
+    )
     notes = (
         "Collector wraps media search adapters into a structured event schema "
         "and now attempts MOPS official records for supported event types."
@@ -218,12 +222,16 @@ def collect_event_records(
             "data_gaps": final_data_gaps,
             "notes": notes,
         },
+        "data_gaps": final_data_gaps,
         "record_count": len(records),
         "record_breakdown": {
             "archive_records": archive_count,
             "secondary_source_records": secondary_count,
             "live_fetched_records": live_fetched_count,
         },
+        "official_artifacts": list(official_payload.get("official_artifacts", [])),
+        "earnings_digest": dict(official_payload.get("earnings_digest", {})),
+        "todo_items": todo_items,
         "records": records,
     }
 
@@ -266,6 +274,45 @@ def _merge_data_gaps(*gap_lists: list[str]) -> list[str]:
             if gap and gap not in merged:
                 merged.append(gap)
     return merged
+
+
+def _merge_todo_items(*todo_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge todo items while preserving order and unique ids."""
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for todo_list in todo_lists:
+        for todo in todo_list:
+            todo_id = str(todo.get("id", "")).strip()
+            if not todo_id or todo_id in seen:
+                continue
+            seen.add(todo_id)
+            merged.append(todo)
+    return merged
+
+
+def _build_todo_items_from_gaps(data_gaps: list[str]) -> list[dict[str, Any]]:
+    """Build collector-level todo items for unresolved data gaps."""
+    priority_map = {
+        "no_news_in_interval": ("non_blocking", "No matching media records were found in the requested interval.", "Expand the date window or enable secondary sources.", "records"),
+        "event_key_missing_for_same_event_comparison": ("blocking", "A recurring earnings-call comparison requires an event key.", "Provide event_key such as 2025Q1 before running comparison workflows.", "query.event_key"),
+        "mops_official_record_unavailable": ("blocking", "MOPS did not return an official event record.", "Retry later or validate the stock code and event type manually.", "official_artifacts"),
+        "mops_record_outside_requested_range": ("blocking", "The MOPS record falls outside the requested collection window.", "Adjust the event_date or date window before retrying.", "query.time_range"),
+    }
+    todos: list[dict[str, Any]] = []
+    for gap in data_gaps:
+        if gap not in priority_map:
+            continue
+        priority, reason, next_action, source_context = priority_map[gap]
+        todos.append(
+            {
+                "id": gap,
+                "priority": priority,
+                "reason": reason,
+                "next_action": next_action,
+                "source_context": source_context,
+            }
+        )
+    return todos
 
 
 def build_collection_queries(

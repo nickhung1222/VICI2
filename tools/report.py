@@ -71,12 +71,17 @@ def build_event_report_payload(
     )
     sections = {
         "event_summary": _build_event_summary_section(event_collection, heat_analysis),
+        "official_sources": _build_official_sources_section(event_collection),
+        "earnings_highlights": _build_earnings_highlights_section(event_collection),
+        "management_tone": _build_management_tone_section(event_collection),
+        "qa_summary": _build_qa_summary_section(event_collection),
         "pre_event_expectations": _build_expectation_section(expectation_analysis, "pre_event_expectations"),
         "event_day_actuals": _build_expectation_section(expectation_analysis, "event_day_actuals"),
         "expectation_vs_actual": _build_comparison_section(expectation_analysis),
         "heat_analysis": _build_heat_section(heat_analysis),
         "event_study": _build_event_study_section(event_study),
         "data_gaps": _collect_data_gaps(event_collection, heat_analysis, expectation_analysis, event_study),
+        "todo_items": _build_todo_section(event_collection),
     }
     markdown = render_event_report_markdown(metadata=metadata, sections=sections)
 
@@ -113,12 +118,17 @@ def render_event_report_markdown(
     lines.append("")
 
     lines.extend(_render_event_summary_section(sections.get("event_summary", {})))
-    lines.extend(_render_expectation_block("二、事件前預期", sections.get("pre_event_expectations", {}), empty_message="尚未提供事件前預期資料。"))
-    lines.extend(_render_expectation_block("三、事件當天實際", sections.get("event_day_actuals", {}), empty_message="尚未提供事件當天實際資料。"))
+    lines.extend(_render_official_sources_block(sections.get("official_sources", {})))
+    lines.extend(_render_earnings_highlights_block(sections.get("earnings_highlights", {})))
+    lines.extend(_render_management_tone_block(sections.get("management_tone", {})))
+    lines.extend(_render_qa_block(sections.get("qa_summary", {})))
+    lines.extend(_render_expectation_block("六、事件前預期", sections.get("pre_event_expectations", {}), empty_message="尚未提供事件前預期資料。"))
+    lines.extend(_render_expectation_block("七、事件當天實際", sections.get("event_day_actuals", {}), empty_message="尚未提供事件當天實際資料。"))
     lines.extend(_render_comparison_block(sections.get("expectation_vs_actual", {})))
     lines.extend(_render_heat_block(sections.get("heat_analysis", {})))
     lines.extend(_render_event_study_block(sections.get("event_study", {})))
     lines.extend(_render_data_gaps_block(sections.get("data_gaps", [])))
+    lines.extend(_render_todo_block(sections.get("todo_items", [])))
 
     lines.append("")
     lines.append("*報告由 VICI2 台灣新聞事件研究 Agent 自動生成*")
@@ -185,6 +195,42 @@ def _build_event_summary_section(event_collection: dict[str, Any], heat_analysis
         "source_policy": collection_plan.get("source_policy", ""),
         "primary_source": collection_plan.get("primary_source", ""),
         "heat_mode": heat_analysis.get("comparison_mode", ""),
+        "official_artifact_count": len(event_collection.get("official_artifacts", [])),
+        "todo_count": len(event_collection.get("todo_items", [])),
+    }
+
+
+def _build_official_sources_section(event_collection: dict[str, Any]) -> dict[str, Any]:
+    artifacts = event_collection.get("official_artifacts", []) if isinstance(event_collection, dict) else []
+    return {
+        "rows": [artifact for artifact in artifacts if isinstance(artifact, dict)],
+    }
+
+
+def _build_earnings_highlights_section(event_collection: dict[str, Any]) -> dict[str, Any]:
+    digest = event_collection.get("earnings_digest", {}) if isinstance(event_collection, dict) else {}
+    return {
+        "financial_snapshot": dict(digest.get("financial_snapshot", {})) if isinstance(digest, dict) else {},
+        "official_takeaways": list(digest.get("official_takeaways", [])) if isinstance(digest, dict) else [],
+        "data_gaps": list(digest.get("data_gaps", [])) if isinstance(digest, dict) else [],
+    }
+
+
+def _build_management_tone_section(event_collection: dict[str, Any]) -> dict[str, Any]:
+    digest = event_collection.get("earnings_digest", {}) if isinstance(event_collection, dict) else {}
+    return dict(digest.get("management_tone", {})) if isinstance(digest, dict) else {}
+
+
+def _build_qa_summary_section(event_collection: dict[str, Any]) -> dict[str, Any]:
+    digest = event_collection.get("earnings_digest", {}) if isinstance(event_collection, dict) else {}
+    data_gaps = []
+    if isinstance(digest, dict):
+        digest_gaps = digest.get("data_gaps", [])
+        if isinstance(digest_gaps, list):
+            data_gaps = [gap for gap in digest_gaps if gap == "qa_not_available"]
+    return {
+        "rows": list(digest.get("qa_topics", [])) if isinstance(digest, dict) else [],
+        "data_gaps": data_gaps,
     }
 
 
@@ -238,6 +284,15 @@ def _build_event_study_section(event_study: dict[str, Any]) -> dict[str, Any]:
     return section
 
 
+def _build_todo_section(event_collection: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(event_collection, dict):
+        return []
+    todo_items = event_collection.get("todo_items", [])
+    if not isinstance(todo_items, list):
+        return []
+    return [item for item in todo_items if isinstance(item, dict)]
+
+
 def _collect_data_gaps(
     event_collection: dict[str, Any],
     heat_analysis: dict[str, Any],
@@ -282,8 +337,99 @@ def _render_event_summary_section(section: dict[str, Any]) -> list[str]:
     lines.append(f"- **事件日期**：{_format_value(section.get('event_date'))}")
     lines.append(f"- **事件鍵**：{_format_value(section.get('event_key'))}")
     lines.append(f"- **記錄數**：{_format_value(section.get('record_count'))}")
+    lines.append(f"- **官方來源數**：{_format_value(section.get('official_artifact_count'))}")
+    lines.append(f"- **待辦數**：{_format_value(section.get('todo_count'))}")
     lines.append(f"- **比較模式**：{_format_value(section.get('comparison_strategy', {}).get('comparison_mode'))}")
     lines.append(f"- **資料來源**：{_format_value(section.get('sources'))}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    return lines
+
+
+def _render_official_sources_block(section: dict[str, Any]) -> list[str]:
+    lines = ["## 二、官方來源清單", ""]
+    rows = section.get("rows", []) if isinstance(section, dict) else []
+    if rows:
+        lines.append(_render_metric_table(rows, ["類型", "來源", "URL", "狀態", "摘錄"]))
+        lines.append("")
+    else:
+        lines.append("尚未提供官方來源資料。")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+    return lines
+
+
+def _render_earnings_highlights_block(section: dict[str, Any]) -> list[str]:
+    lines = ["## 三、法說重點", ""]
+    financial_snapshot = section.get("financial_snapshot", {}) if isinstance(section, dict) else {}
+    official_takeaways = section.get("official_takeaways", []) if isinstance(section, dict) else []
+
+    if financial_snapshot:
+        rows = [
+            {
+                "metric_name": metric,
+                "content": _format_verified_metric(metric_payload),
+                "source_name": metric_payload.get("source_name", ""),
+            }
+            for metric, metric_payload in financial_snapshot.items()
+            if isinstance(metric_payload, dict)
+        ]
+        lines.append(_render_metric_table(rows, ["指標", "內容", "來源"]))
+        lines.append("")
+    else:
+        lines.append("尚未提供已驗證的官方財務重點。")
+        lines.append("")
+
+    if official_takeaways:
+        lines.append("- **官方摘要重點**：")
+        for takeaway in official_takeaways:
+            lines.append(f"  - {_format_value(takeaway)}")
+    if section.get("data_gaps"):
+        lines.append(f"- **資料缺口**：{_format_value(section.get('data_gaps'))}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    return lines
+
+
+def _render_management_tone_block(section: dict[str, Any]) -> list[str]:
+    lines = ["## 四、管理層態度", ""]
+    if not section:
+        lines.append("尚未提供管理層態度資料。")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        return lines
+
+    lines.append(f"- **標籤**：{_format_value(section.get('label'))}")
+    lines.append(f"- **驗證狀態**：{_format_value(section.get('validation_status'))}")
+    evidence = section.get("evidence", [])
+    if evidence:
+        lines.append("- **證據句**：")
+        for item in evidence:
+            lines.append(
+                f"  - {_format_value(item.get('excerpt'))} "
+                f"({_format_value(item.get('source_artifact_type'))}, {_format_value(item.get('source_ref'))})"
+            )
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    return lines
+
+
+def _render_qa_block(section: dict[str, Any]) -> list[str]:
+    lines = ["## 五、Q&A 摘要", ""]
+    rows = section.get("rows", []) if isinstance(section, dict) else []
+    if rows:
+        lines.append(_render_metric_table(rows, ["主題", "問題", "回答", "來源"]))
+        lines.append("")
+    else:
+        lines.append("尚未提供已驗證的 Q&A 摘要。")
+        lines.append("")
+    if section.get("data_gaps"):
+        lines.append(f"- **資料缺口**：{_format_value(section.get('data_gaps'))}")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -316,7 +462,7 @@ def _render_expectation_block(title: str, section: dict[str, Any], empty_message
 
 
 def _render_comparison_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 四、預期 vs 實際", ""]
+    lines = ["## 八、預期 vs 實際", ""]
     rows = section.get("rows", []) if isinstance(section, dict) else []
     summary = section.get("summary", "") if isinstance(section, dict) else ""
 
@@ -338,7 +484,7 @@ def _render_comparison_block(section: dict[str, Any]) -> list[str]:
 
 
 def _render_heat_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 五、熱度分析", ""]
+    lines = ["## 九、熱度分析", ""]
     if not section:
         lines.append("尚未提供熱度分析資料。")
         lines.append("")
@@ -364,7 +510,7 @@ def _render_heat_block(section: dict[str, Any]) -> list[str]:
 
 
 def _render_event_study_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 六、事件研究（可選）", ""]
+    lines = ["## 十、事件研究（可選）", ""]
     if not section:
         lines.append("尚未提供事件研究資料。")
         lines.append("")
@@ -401,10 +547,32 @@ def _render_event_study_block(section: dict[str, Any]) -> list[str]:
 
 
 def _render_data_gaps_block(data_gaps: list[str]) -> list[str]:
-    lines = ["## 七、資料缺口與限制", ""]
+    lines = ["## 十一、資料缺口與限制", ""]
     if data_gaps:
         for gap in data_gaps:
             lines.append(f"- {gap}")
+    else:
+        lines.append("- 無")
+    lines.append("")
+    return lines
+
+
+def _render_todo_block(todo_items: list[dict[str, Any]]) -> list[str]:
+    lines = ["## 十二、待辦事項", ""]
+    if todo_items:
+        for item in todo_items:
+            lines.append(
+                "- "
+                + " | ".join(
+                    [
+                        f"id={_format_value(item.get('id'))}",
+                        f"priority={_format_value(item.get('priority'))}",
+                        f"reason={_format_value(item.get('reason'))}",
+                        f"next_action={_format_value(item.get('next_action'))}",
+                        f"source_context={_format_value(item.get('source_context'))}",
+                    ]
+                )
+            )
     else:
         lines.append("- 無")
     lines.append("")
@@ -487,6 +655,33 @@ def _render_metric_table(rows: list[dict[str, Any]], columns: list[str]) -> str:
                 )
                 + " |"
             )
+        elif columns == ["類型", "來源", "URL", "狀態", "摘錄"]:
+            body.append(
+                "| "
+                + " | ".join(
+                    [
+                        _format_value(_pick(row, ["artifact_type", "type"])),
+                        _format_value(_pick(row, ["source_name", "source"])),
+                        _format_value(_pick(row, ["url", "source_ref"])),
+                        _format_value(_pick(row, ["validation_status", "retrieval_status", "status"])),
+                        _format_value(_pick(row, ["excerpt", "summary", "content"])),
+                    ]
+                )
+                + " |"
+            )
+        elif columns == ["主題", "問題", "回答", "來源"]:
+            body.append(
+                "| "
+                + " | ".join(
+                    [
+                        _format_value(_pick(row, ["topic", "metric_name", "name", "label"])),
+                        _format_value(_pick(row, ["question_summary", "question", "summary"])),
+                        _format_value(_pick(row, ["answer_summary", "answer", "content"])),
+                        _format_value(_pick(row, ["source_ref", "source_name", "source"])),
+                    ]
+                )
+                + " |"
+            )
         else:
             body.append("| " + " | ".join(_format_value(row.get(col.lower(), "")) for col in columns) + " |")
 
@@ -546,6 +741,18 @@ def _format_observation(observation: Any) -> str:
     if suffix_parts:
         return f"{base} ({'; '.join(suffix_parts)})"
     return base
+
+
+def _format_verified_metric(observation: dict[str, Any]) -> str:
+    base = _format_observation(observation)
+    if base == "-":
+        return base
+    evidence = _format_value(observation.get("evidence_span"))
+    source_ref = _format_value(observation.get("source_ref"))
+    artifact_type = _format_value(observation.get("source_artifact_type"))
+    validation_status = _format_value(observation.get("validation_status"))
+    suffix = f"evidence={evidence}; source={source_ref}; artifact={artifact_type}; validation={validation_status}"
+    return f"{base} ({suffix})"
 
 
 def _summarize_metric_statuses(status_counts: Any) -> str:
