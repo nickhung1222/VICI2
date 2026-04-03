@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -185,6 +186,8 @@ def analyze_expectation_vs_actual(
             grouped[metric][phase].append(observation)
 
     metric_results: list[dict[str, Any]] = []
+    pre_event_rows: list[dict[str, Any]] = []
+    event_day_rows: list[dict[str, Any]] = []
     data_gaps: list[str] = []
 
     for metric in SUPPORTED_METRICS:
@@ -192,12 +195,20 @@ def analyze_expectation_vs_actual(
         actual = _select_best_observation(grouped[metric]["event_day"])
         result = _compare_metric(metric, expectation, actual)
         metric_results.append(result)
+        if expectation:
+            pre_event_rows.append(_format_observation_row(metric, expectation, "pre_event_expectations"))
+        if actual:
+            event_day_rows.append(_format_observation_row(metric, actual, "event_day_actuals"))
         if result["status"] == "unknown":
             data_gaps.append(f"{metric}_comparison_unavailable")
 
     status_counts = Counter(result["status"] for result in metric_results)
     if not filtered_records:
         data_gaps.append("no_records_for_event_key")
+    if not pre_event_rows:
+        data_gaps.append("pre_event_expectations_missing")
+    if not event_day_rows:
+        data_gaps.append("event_day_actuals_missing")
 
     return {
         "analysis_target": {
@@ -209,8 +220,13 @@ def analyze_expectation_vs_actual(
         "observations_considered": len(observations),
         "deterministic_observations_considered": len(deterministic_observations),
         "hybrid_observations_considered": len(hybrid_observations),
+        "pre_event_expectations": pre_event_rows,
+        "event_day_actuals": event_day_rows,
         "metrics": metric_results,
+        "comparison_rows": [_format_comparison_row(result) for result in metric_results],
         "status_counts": dict(status_counts),
+        "summary": _summarize_metric_statuses(status_counts),
+        "comparison_summary": _summarize_metric_statuses(status_counts),
         "data_gaps": _dedupe_preserve_order(data_gaps),
         "hybrid_enabled": bool(os.environ.get("GEMINI_API_KEY")),
         "hybrid_error": hybrid_error,
@@ -510,6 +526,50 @@ def _compare_metric(
     return result
 
 
+def _format_observation(observation: dict[str, Any] | None) -> str:
+    if not observation:
+        return "-"
+
+    low = _coerce_number(observation.get("value_low"))
+    high = _coerce_number(observation.get("value_high"))
+    unit = str(observation.get("unit", "")).strip()
+    if low is None and high is None:
+        return "-"
+    if low is None:
+        low = high
+    if high is None:
+        high = low
+    if low is None or high is None:
+        return "-"
+    if low == high:
+        return f"{low:g}{f' {unit}' if unit else ''}"
+    return f"{low:g} ~ {high:g}{f' {unit}' if unit else ''}"
+
+
+def _format_observation_row(section_metric: str, observation: dict[str, Any], section_key: str) -> dict[str, Any]:
+    return {
+        "metric_name": section_metric,
+        "content": _format_observation(observation),
+        "source_name": str(observation.get("source_headline", "")).strip() or str(observation.get("source_kind", "")).strip(),
+        "source_kind": observation.get("source_kind", ""),
+        "event_phase": observation.get("event_phase", ""),
+        "event_key": observation.get("event_key", ""),
+        "confidence": observation.get("confidence", 0.0),
+        "source_record_index": observation.get("source_record_index", 0),
+        "section": section_key,
+    }
+
+
+def _format_comparison_row(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "metric_name": result.get("metric", ""),
+        "expectation": _format_observation(result.get("expectation")),
+        "actual": _format_observation(result.get("actual")),
+        "expectation_match": result.get("status", ""),
+        "comparison_direction": result.get("comparison_direction", ""),
+    }
+
+
 def _observation_bounds(observation: dict[str, Any]) -> tuple[float | None, float | None]:
     low = _coerce_number(observation.get("value_low"))
     high = _coerce_number(observation.get("value_high"))
@@ -598,6 +658,14 @@ def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
     return result
 
 
+def _summarize_metric_statuses(status_counts: Counter) -> str:
+    if not status_counts:
+        return "尚無可比較的指標。"
+    order = ("beat", "matched", "partially_matched", "below", "unknown")
+    parts = [f"{status}: {status_counts.get(status, 0)}" for status in order if status_counts.get(status, 0)]
+    return "；".join(parts) if parts else "尚無可比較的指標。"
+
+
 def _extract_hybrid_observations(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Use LLM normalization on candidate records that likely contain metrics."""
     if not os.environ.get("GEMINI_API_KEY"):
@@ -643,18 +711,30 @@ def _extract_hybrid_observations(records: list[dict[str, Any]]) -> list[dict[str
         "required": ["observations"],
     }
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    model_id = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-    response = client.models.generate_content(
-        model=model_id,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-            temperature=0.0,
-        ),
-    )
-    text = getattr(response, "text", "") or ""
+    timeout_seconds = float(os.environ.get("EXPECTATION_HYBRID_TIMEOUT_SECONDS", "8"))
+
+    def _run_hybrid() -> str:
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        model_id = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        response = client.models.generate_content(
+            model=model_id,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.0,
+            ),
+        )
+        return getattr(response, "text", "") or ""
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            text = executor.submit(_run_hybrid).result(timeout=timeout_seconds)
+    except FuturesTimeoutError as exc:
+        raise TimeoutError("hybrid expectation extraction timed out") from exc
+    except Exception:
+        return []
+
     if not text:
         return []
     try:

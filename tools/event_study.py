@@ -22,6 +22,7 @@ def run_event_study(
     estimation_window: int = 120,
     event_window_pre: int = 5,
     event_window_post: int = 5,
+    reaction_shift_trading_days: int = 0,
 ) -> dict:
     """Run event study for a list of event dates.
 
@@ -33,6 +34,8 @@ def run_event_study(
         estimation_window: Number of trading days for OLS estimation (default 120)
         event_window_pre: Days before event to include in event window (default 5)
         event_window_post: Days after event to include in event window (default 5)
+        reaction_shift_trading_days: Shift t=0 by N trading days after the
+            supplied event date. Use 1 for after-market announcements.
 
     Returns:
         dict with avg_car, std_error, t_stats, individual_cars, relative_days, n_events, skipped_events
@@ -43,17 +46,26 @@ def run_event_study(
     all_cars = []
     all_ars = []
     skipped = []
+    aligned_events = []
     window_size = event_window_pre + event_window_post + 1
 
     for event_date_str in event_dates:
-        event_dt = pd.to_datetime(event_date_str)
+        announcement_dt = pd.to_datetime(event_date_str)
 
-        # Find the nearest trading day on or after the event date
-        available = returns_series.index[returns_series.index >= event_dt]
+        # Find the nearest trading day on or after the announcement date, then
+        # shift forward when the market can only react after the close.
+        available = returns_series.index[returns_series.index >= announcement_dt]
         if len(available) == 0:
             skipped.append({"date": event_date_str, "reason": "event date after all available data"})
             continue
-        event_idx = returns_series.index.get_loc(available[0])
+        anchor_idx = returns_series.index.get_loc(available[0])
+        event_idx = anchor_idx + reaction_shift_trading_days
+
+        if event_idx >= len(returns_series):
+            skipped.append({"date": event_date_str, "reason": "reaction date after all available data"})
+            continue
+
+        reaction_dt = returns_series.index[event_idx]
 
         # Estimation window: [event_idx - 130, event_idx - 11]
         gap = 10  # buffer days between estimation and event window
@@ -93,6 +105,13 @@ def run_event_study(
 
         all_ars.append(ar)
         all_cars.append(car)
+        aligned_events.append(
+            {
+                "announcement_date": event_date_str,
+                "reaction_date": reaction_dt.strftime("%Y-%m-%d"),
+                "reaction_shift_trading_days": reaction_shift_trading_days,
+            }
+        )
 
     n_events = len(all_cars)
     relative_days = list(range(-event_window_pre, event_window_post + 1))
@@ -107,6 +126,9 @@ def run_event_study(
             "std_error": [0.0] * window_size,
             "t_stats": [0.0] * window_size,
             "individual_cars": [],
+            "aligned_events": [],
+            "reaction_dates_used": [],
+            "reaction_shift_trading_days": reaction_shift_trading_days,
             "error": "No events could be analyzed. Check that event dates fall within the data range with sufficient history.",
         }
 
@@ -135,4 +157,7 @@ def run_event_study(
         "t_stats": [float(x) for x in t_stats],
         "individual_cars": [c.tolist() for c in all_cars],
         "event_dates_used": [d for d in event_dates if d not in [s["date"] for s in skipped]],
+        "reaction_dates_used": [row["reaction_date"] for row in aligned_events],
+        "aligned_events": aligned_events,
+        "reaction_shift_trading_days": reaction_shift_trading_days,
     }

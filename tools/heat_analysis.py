@@ -19,6 +19,8 @@ def scan_event_heat(
     event_key: str = "",
     comparison_event_date: str = "",
     max_results: int = 24,
+    primary_source: str = "cnyes",
+    allow_secondary_sources: bool = True,
 ) -> dict[str, Any]:
     """Collect event records and compute structured heat analysis."""
     target = build_stock_target(symbol=symbol, code=stock_code, name=stock_name)
@@ -35,6 +37,8 @@ def scan_event_heat(
         event_date=event_date,
         event_key=strategy["event_key"],
         max_results=max_results,
+        primary_source=primary_source,
+        allow_secondary_sources=allow_secondary_sources,
     )
     current_total = current_records["record_count"]
     current_primary_total = current_records.get("record_breakdown", {}).get("archive_records", current_total)
@@ -53,6 +57,8 @@ def scan_event_heat(
                 event_date=comparison_date,
                 event_key=strategy["comparison_event_key"],
                 max_results=max_results,
+                primary_source=primary_source,
+                allow_secondary_sources=allow_secondary_sources,
             )
             if comparison_date and strategy["comparison_event_key"]
             else None
@@ -94,6 +100,8 @@ def scan_event_heat(
             event_date=event_date,
             event_key=strategy["event_key"],
             max_results=max_results,
+            primary_source=primary_source,
+            allow_secondary_sources=allow_secondary_sources,
         )
         result = analyze_news_heat(
             analysis_target=_format_analysis_target(target),

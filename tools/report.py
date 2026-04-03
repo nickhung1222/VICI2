@@ -372,12 +372,22 @@ def _render_event_study_block(section: dict[str, Any]) -> list[str]:
         lines.append("")
         return lines
 
+    if section.get("event_date"):
+        lines.append(f"- **原始事件日**：{_format_value(section.get('event_date'))}")
+    if section.get("reaction_date"):
+        lines.append(f"- **市場反應日（t=0）**：{_format_value(section.get('reaction_date'))}")
     if section.get("summary"):
         lines.append(f"- **摘要**：{_format_value(section.get('summary'))}")
     if section.get("n_events") is not None:
         lines.append(f"- **有效事件數**：{_format_value(section.get('n_events'))}")
     if section.get("n_skipped") is not None:
         lines.append(f"- **跳過事件數**：{_format_value(section.get('n_skipped'))}")
+    if section.get("reaction_shift_trading_days") is not None:
+        lines.append(
+            f"- **t=0 位移交易日數**：{_format_value(section.get('reaction_shift_trading_days'))}"
+        )
+    if section.get("data_window"):
+        lines.append(f"- **股價資料窗**：{_format_value(section.get('data_window'))}")
     if section.get("chart_path"):
         lines.append(f"- **圖表**：{_format_value(section.get('chart_path'))}")
     if section.get("data_gaps"):

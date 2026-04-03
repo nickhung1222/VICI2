@@ -10,7 +10,7 @@ import time
 import re
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Union
+from typing import Any, Union
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
@@ -47,7 +47,8 @@ def search_news(
     source_policy: str = "archive_first",
     primary_source: str = "cnyes",
     allow_secondary_sources: bool = True,
-) -> list[dict]:
+    return_metadata: bool = False,
+) -> list[dict] | dict[str, Any]:
     """Search Taiwan financial news articles.
 
     Args:
@@ -75,7 +76,25 @@ def search_news(
         )
         normalized_records = archive_payload.get("records", [])
         if normalized_records:
-            return [_legacy_article_shape(record) for record in normalized_records[:max_results]]
+            articles = [_legacy_article_shape(record) for record in normalized_records[:max_results]]
+            if return_metadata:
+                return {
+                    "articles": articles,
+                    "data_gaps": list(archive_payload.get("data_gaps", [])),
+                    "source_breakdown": dict(archive_payload.get("source_breakdown", {})),
+                }
+            return articles
+        if primary_source == "goodinfo" and not allow_secondary_sources:
+            if return_metadata:
+                gaps = list(archive_payload.get("data_gaps", []))
+                if "no_news_in_interval" not in gaps:
+                    gaps.append("no_news_in_interval")
+                return {
+                    "articles": [],
+                    "data_gaps": gaps,
+                    "source_breakdown": dict(archive_payload.get("source_breakdown", {})),
+                }
+            return []
 
     query_plans = _build_query_variants(query, date_from=date_from, date_to=date_to)
     results: list[dict] = []
@@ -102,7 +121,18 @@ def search_news(
         if prioritize_web and index == 0 and results:
             break
 
-    return results[:max_results]
+    final_results = results[:max_results]
+    if return_metadata:
+        return {
+            "articles": final_results,
+            "data_gaps": [],
+            "source_breakdown": {
+                "primary_count": 0,
+                "secondary_count": len(final_results),
+                "merged_count": len(final_results),
+            },
+        }
+    return final_results
 
 
 def _legacy_article_shape(record: dict[str, Any]) -> dict[str, Any]:

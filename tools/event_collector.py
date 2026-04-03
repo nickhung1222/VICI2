@@ -9,7 +9,7 @@ Phase 1 design:
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from tools.event_sources import collect_official_event_records
@@ -37,6 +37,9 @@ def collect_event_records(
     event_date: str = "",
     event_key: str = "",
     max_results: int = 12,
+    pre_event_report_days: int | None = None,
+    primary_source: str = "cnyes",
+    allow_secondary_sources: bool = True,
 ) -> dict[str, Any]:
     """Collect structured event-related records for a Taiwan stock.
 
@@ -44,13 +47,19 @@ def collect_event_records(
     """
     target = build_stock_target(symbol=symbol, code=stock_code, name=stock_name)
     comparison_strategy = build_comparison_strategy(event_type=event_type, event_key=event_key)
+    effective_start_date, effective_end_date = _derive_effective_collection_window(
+        start_date=start_date,
+        end_date=end_date,
+        event_type=event_type,
+        pre_event_report_days=pre_event_report_days,
+    )
     official_payload = collect_official_event_records(
         stock_code=target["code"],
         stock_name=target["name"],
         symbol=target["symbol"],
         event_type=event_type,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=effective_start_date,
+        end_date=effective_end_date,
         event_date=event_date,
         event_key=comparison_strategy["event_key"],
     )
@@ -69,21 +78,27 @@ def collect_event_records(
     archive_count = 0
     secondary_count = 0
     live_fetched_count = 0
+    archive_data_gaps: list[str] = []
 
     for query in queries:
-        articles = search_news(
+        search_payload = search_news(
             query=query,
-            date_from=start_date,
-            date_to=end_date,
+            date_from=effective_start_date,
+            date_to=effective_end_date,
             max_results=per_query,
             stock_code=target["code"],
             stock_name=target["name"],
             event_type=event_type,
             queries=queries,
             source_policy="archive_first",
-            primary_source="cnyes",
-            allow_secondary_sources=True,
+            primary_source=primary_source,
+            allow_secondary_sources=allow_secondary_sources,
+            return_metadata=True,
         )
+        articles = search_payload.get("articles", []) if isinstance(search_payload, dict) else search_payload
+        for gap in (search_payload.get("data_gaps", []) if isinstance(search_payload, dict) else []):
+            if gap not in archive_data_gaps:
+                archive_data_gaps.append(gap)
         for article in articles:
             article_copy = dict(article)
             article_copy["matched_query"] = query
@@ -96,7 +111,7 @@ def collect_event_records(
             ranked_articles.append(article_copy)
             if article_copy.get("is_primary_source"):
                 archive_count += 1
-            elif article_copy.get("retrieval_method") in {"google_news_rss", "goodinfo_stock_date_index", "yfinance_get_news"}:
+            elif article_copy.get("retrieval_method") in {"google_news_rss", "goodinfo_http_index", "goodinfo_browser_index", "yfinance_get_news"}:
                 secondary_count += 1
             else:
                 live_fetched_count += 1
@@ -160,6 +175,15 @@ def collect_event_records(
 
     records = dedupe_records(records, ["stock_code", "event_date", "article_date", "headline", "source_url"])
     records.sort(key=lambda item: (item.get("article_date", ""), item.get("headline", "")))
+    final_data_gaps = _merge_data_gaps(comparison_strategy["data_gaps"], official_payload["data_gaps"], archive_data_gaps)
+    if not records and primary_source == "goodinfo" and not allow_secondary_sources and "no_news_in_interval" not in final_data_gaps:
+        final_data_gaps.append("no_news_in_interval")
+    notes = (
+        "Collector wraps media search adapters into a structured event schema "
+        "and now attempts MOPS official records for supported event types."
+    )
+    if not records and primary_source == "goodinfo" and not allow_secondary_sources:
+        notes += " 該區間沒有新聞。"
 
     return {
         "query": {
@@ -167,6 +191,8 @@ def collect_event_records(
             "time_range": {
                 "start": start_date,
                 "end": end_date,
+                "effective_start": effective_start_date,
+                "effective_end": effective_end_date,
             },
             "stock": target,
             "event_date": event_date,
@@ -179,7 +205,9 @@ def collect_event_records(
             "mode": "重點整理",
             "comparison_strategy": comparison_strategy,
             "source_policy": "archive_first",
-            "primary_source": "cnyes",
+            "primary_source": primary_source,
+            "allow_secondary_sources": allow_secondary_sources,
+            "pre_event_report_days": pre_event_report_days,
         },
         "data_completeness": {
             "mode": "重點整理",
@@ -187,11 +215,8 @@ def collect_event_records(
             "heat_analysis_included": False,
             "comparison_strategy": comparison_strategy["comparison_mode"],
             "comparison_ready": comparison_strategy["comparison_ready"],
-            "data_gaps": _merge_data_gaps(comparison_strategy["data_gaps"], official_payload["data_gaps"]),
-            "notes": (
-                "Collector wraps media search adapters into a structured event schema "
-                "and now attempts MOPS official records for supported event types."
-            ),
+            "data_gaps": final_data_gaps,
+            "notes": notes,
         },
         "record_count": len(records),
         "record_breakdown": {
@@ -205,10 +230,32 @@ def collect_event_records(
 
 def _build_source_list(official_records: list[dict[str, Any]]) -> list[str]:
     """Return ordered source names used by the collector."""
-    sources = ["cnyes", "moneydj", "web_search"]
+    sources = ["cnyes", "goodinfo", "moneydj", "web_search"]
     if official_records:
         sources.insert(0, "mops")
     return sources
+
+
+def _derive_effective_collection_window(
+    *,
+    start_date: str,
+    end_date: str,
+    event_type: str,
+    pre_event_report_days: int | None,
+) -> tuple[str, str]:
+    """Clamp formal event-report collection windows for pre-event analysis."""
+    if not start_date or not end_date or not pre_event_report_days or event_type != "法說會":
+        return start_date, end_date
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        return start_date, end_date
+    effective_end_dt = end_dt - timedelta(days=1)
+    effective_start_dt = max(start_dt, effective_end_dt - timedelta(days=pre_event_report_days - 1))
+    if effective_start_dt > effective_end_dt:
+        return start_date, end_date
+    return effective_start_dt.strftime("%Y-%m-%d"), effective_end_dt.strftime("%Y-%m-%d")
 
 
 def _merge_data_gaps(*gap_lists: list[str]) -> list[str]:

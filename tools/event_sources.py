@@ -63,21 +63,27 @@ def fetch_mops_investor_conference(
     event_key: str = "",
 ) -> dict[str, Any] | None:
     """Fetch the latest investor-conference record from MOPS OV."""
-    response = requests.post(
-        _MOPS_OV_EVENT_URL,
-        data={
-            "step": "1",
-            "firstin": "true",
-            "off": "1",
-            "queryName": "co_id",
-            "inpuType": "co_id",
-            "TYPEK": "all",
-            "co_id": stock_code,
-        },
-        headers=_HEADERS,
-        timeout=5,
-    )
-    response.raise_for_status()
+    try:
+        response = requests.post(
+            _MOPS_OV_EVENT_URL,
+            data={
+                "step": "1",
+                "firstin": "true",
+                "off": "1",
+                "queryName": "co_id",
+                "inpuType": "co_id",
+                "TYPEK": "all",
+                "co_id": stock_code,
+            },
+            headers=_HEADERS,
+            timeout=5,
+        )
+    except requests.RequestException:
+        return None
+    try:
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
 
     soup = BeautifulSoup(response.text, "lxml")
     table = soup.select_one("table.hasBorder")

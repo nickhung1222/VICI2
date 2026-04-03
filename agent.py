@@ -147,6 +147,10 @@ TOOLS = [
                     "type": "integer",
                     "description": "事件後天數（預設 5）",
                 },
+                "reaction_shift_trading_days": {
+                    "type": "integer",
+                    "description": "若事件在收盤後公布，將 t=0 往後平移的交易日數；例如台股盤後法說會可設為 1。",
+                },
             },
             "required": ["stock_returns", "market_returns", "dates", "event_dates"],
         },
@@ -247,6 +251,7 @@ def execute_tool(name: str, inputs: dict) -> str:
                 estimation_window=inputs.get("estimation_window", 120),
                 event_window_pre=inputs.get("event_window_pre", 5),
                 event_window_post=inputs.get("event_window_post", 5),
+                reaction_shift_trading_days=inputs.get("reaction_shift_trading_days", 0),
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -363,6 +368,8 @@ def _run_event_study_gemini(
         f"- **事件主題**：{topic}\n"
         f"- **事件日期**：{', '.join(event_dates)}\n"
         f"- **建議股價資料範圍**：{data_start} 到 {data_end}\n\n"
+        f"若事件屬於台股盤後公布（例如法說會），請在呼叫 run_event_study 時將 "
+        f"`reaction_shift_trading_days` 設為 1，讓下一個交易日作為 t=0。\n\n"
         f"請依照系統提示的工作流程完整執行：新聞抓取 → 情緒分析 → 股價資料 → 事件研究 → 圖表 → 儲存報告。"
     )
 
@@ -609,6 +616,8 @@ def event_collect(
         event_date=event_date,
         event_key=event_key,
         max_results=max_results,
+        primary_source="goodinfo" if event_type == "法說會" else "cnyes",
+        allow_secondary_sources=False if event_type == "法說會" else True,
     )
     topic = f"{payload['query']['stock']['code'] or stock}_{event_type}"
     return save_event_record(payload, topic=topic)
@@ -642,6 +651,8 @@ def heat_scan(
         event_key=event_key,
         comparison_event_date=comparison_event_date,
         max_results=max_results,
+        primary_source="goodinfo" if event_type == "法說會" else "cnyes",
+        allow_secondary_sources=False if event_type == "法說會" else True,
     )
     topic = f"{payload['stock']['code'] or stock}_{event_type}_heat"
     return save_event_record(payload, topic=topic)
@@ -682,6 +693,9 @@ def event_report(
         event_date=event_date,
         event_key=event_key,
         max_results=max_results,
+        pre_event_report_days=7 if event_type == "法說會" else None,
+        primary_source="goodinfo" if event_type == "法說會" else "cnyes",
+        allow_secondary_sources=False if event_type == "法說會" else True,
     )
     heat_payload = scan_event_heat(
         symbol=stock,
@@ -691,6 +705,8 @@ def event_report(
         event_key=event_key,
         comparison_event_date=comparison_event_date,
         max_results=max_results,
+        primary_source="goodinfo" if event_type == "法說會" else "cnyes",
+        allow_secondary_sources=False if event_type == "法說會" else True,
     )
     expectation_payload = _build_expectation_payload(
         records=event_collection["records"],
@@ -698,7 +714,12 @@ def event_report(
         event_key=event_collection["query"].get("event_key", ""),
     )
     event_study_payload = (
-        _build_event_study_payload(stock=stock, event_date=event_date, end_date=end_date)
+        _build_event_study_payload(
+            stock=stock,
+            event_date=event_date,
+            end_date=end_date,
+            reaction_shift_trading_days=1 if event_type == "法說會" else 0,
+        )
         if include_event_study
         else None
     )
@@ -747,19 +768,40 @@ def _build_expectation_payload(records: list[dict[str, Any]], event_type: str, e
     return analyze_expectation_vs_actual(records=records, event_key=event_key, event_type=event_type)
 
 
-def _build_event_study_payload(stock: str, event_date: str, end_date: str) -> dict[str, Any]:
+def _build_event_study_payload(
+    stock: str,
+    event_date: str,
+    end_date: str,
+    reaction_shift_trading_days: int = 0,
+) -> dict[str, Any]:
     """Run deterministic event study for a single event date."""
-    price_data = fetch_stock_data(symbol=stock, start_date=event_date, end_date=end_date)
+    event_dt = datetime.strptime(event_date, "%Y-%m-%d")
+    requested_end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+    # Event study needs data after the event to fill the full event window.
+    # Extend the requested range when the report end date stops too close to t=0.
+    effective_end_dt = max(requested_end_dt, event_dt + timedelta(days=15))
+    effective_start_date = (event_dt - timedelta(days=180)).strftime("%Y-%m-%d")
+    effective_end_date = effective_end_dt.strftime("%Y-%m-%d")
+
+    price_data = fetch_stock_data(
+        symbol=stock,
+        start_date=effective_start_date,
+        end_date=effective_end_date,
+    )
     result = run_event_study(
         stock_returns=price_data["stock_returns"],
         market_returns=price_data["market_returns"],
         dates=price_data["dates"],
         event_dates=[event_date],
+        reaction_shift_trading_days=reaction_shift_trading_days,
     )
     full_window_car = result["avg_car"][-1] if result.get("avg_car") else 0.0
+    reaction_dates = result.get("reaction_dates_used", [])
+    reaction_date = reaction_dates[0] if reaction_dates else ""
     summary = (
         f"事件研究完成，單一事件樣本 {result.get('n_events', 0)} 筆，"
-        f"[-5,+5] CAR {full_window_car:.4f}"
+        f"以市場反應日 {reaction_date or event_date} 作為 t=0，[-5,+5] CAR {full_window_car:.4f}"
     )
     data_gaps = []
     if result.get("error"):
@@ -769,7 +811,13 @@ def _build_event_study_payload(stock: str, event_date: str, end_date: str) -> di
 
     return {
         **result,
+        "event_date": event_date,
+        "reaction_date": reaction_date or event_date,
         "summary": summary,
         "n_skipped": len(result.get("skipped_events", [])),
+        "data_window": {
+            "start": effective_start_date,
+            "end": effective_end_date,
+        },
         "data_gaps": data_gaps,
     }

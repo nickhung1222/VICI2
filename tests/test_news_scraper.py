@@ -52,3 +52,34 @@ def test_search_news_uses_web_fallback_when_primary_sources_fail(monkeypatch):
     assert len(results) == 1
     assert results[0]["source"] == "ctee"
     assert results[0]["title"] == "台積電法說會重點整理"
+
+
+def test_search_news_stays_empty_for_strict_goodinfo_only(monkeypatch):
+    monkeypatch.setattr(
+        "tools.news_scraper.fetch_news_archive",
+        lambda **kwargs: {
+            "records": [],
+            "data_gaps": ["goodinfo_http_empty", "goodinfo_browser_empty"],
+            "source_breakdown": {
+                "primary_count": 0,
+                "secondary_count": 0,
+                "merged_count": 0,
+            },
+        },
+    )
+
+    payload = search_news(
+        query="聯發科 法說會",
+        date_from="2023-01-27",
+        date_to="2023-02-02",
+        max_results=20,
+        stock_code="2454",
+        stock_name="聯發科",
+        event_type="法說會",
+        primary_source="goodinfo",
+        allow_secondary_sources=False,
+        return_metadata=True,
+    )
+
+    assert payload["articles"] == []
+    assert "no_news_in_interval" in payload["data_gaps"]

@@ -2,9 +2,11 @@
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from agent import _build_event_study_payload
 from tools.report import build_event_report_payload, render_event_report_markdown
 
 
@@ -104,9 +106,13 @@ def test_build_event_report_payload_assembles_sections():
         heat_analysis=_make_heat_analysis(),
         expectation_analysis=_make_expectation_analysis(),
         event_study={
+            "event_date": "2025-04-17",
+            "reaction_date": "2025-04-18",
             "summary": "事件後市場反應偏正向。",
             "n_events": 1,
             "n_skipped": 0,
+            "reaction_shift_trading_days": 1,
+            "data_window": {"start": "2024-10-19", "end": "2025-05-02"},
             "chart_path": "outputs/charts/demo.png",
             "data_gaps": [],
         },
@@ -121,6 +127,7 @@ def test_build_event_report_payload_assembles_sections():
     assert "## 一、事件摘要" in payload["markdown"]
     assert "## 五、熱度分析" in payload["markdown"]
     assert "## 六、事件研究（可選）" in payload["markdown"]
+    assert "市場反應日（t=0）" in payload["markdown"]
     assert "beat" in payload["markdown"]
     assert "56%" in payload["markdown"]
 
@@ -196,3 +203,59 @@ def test_build_event_report_payload_accepts_metric_based_expectation_analysis():
     assert "57.0 ~ 59.0 %" in markdown
     assert "58.0 %" in markdown
     assert "matched: 1；unknown: 1" in markdown
+
+
+def test_build_event_study_payload_extends_price_window_for_post_event_days():
+    captured = {}
+
+    def fake_fetch_stock_data(symbol, start_date, end_date):
+        captured["symbol"] = symbol
+        captured["start_date"] = start_date
+        captured["end_date"] = end_date
+        return {
+            "stock_returns": [0.01] * 250,
+            "market_returns": [0.008] * 250,
+            "dates": [f"2024-01-{(i % 28) + 1:02d}" for i in range(250)],
+        }
+
+    def fake_run_event_study(**kwargs):
+        return {
+            "n_events": 1,
+            "avg_car": [0.0] * 11,
+            "avg_ar": [0.0] * 11,
+            "relative_days": list(range(-5, 6)),
+            "std_error": [0.0] * 11,
+            "t_stats": [0.0] * 11,
+            "individual_cars": [[0.0] * 11],
+            "skipped_events": [],
+            "reaction_dates_used": ["2025-04-18"],
+            "aligned_events": [
+                {
+                    "announcement_date": "2025-04-17",
+                    "reaction_date": "2025-04-18",
+                    "reaction_shift_trading_days": 1,
+                }
+            ],
+            "reaction_shift_trading_days": kwargs.get("reaction_shift_trading_days", 0),
+        }
+
+    with patch("agent.fetch_stock_data", side_effect=fake_fetch_stock_data), patch(
+        "agent.run_event_study", side_effect=fake_run_event_study
+    ):
+        payload = _build_event_study_payload(
+            stock="2330.TW",
+            event_date="2025-04-17",
+            end_date="2025-04-18",
+            reaction_shift_trading_days=1,
+        )
+
+    assert captured["symbol"] == "2330.TW"
+    assert captured["start_date"] == "2024-10-19"
+    assert captured["end_date"] == "2025-05-02"
+    assert payload["data_window"] == {
+        "start": "2024-10-19",
+        "end": "2025-05-02",
+    }
+    assert payload["event_date"] == "2025-04-17"
+    assert payload["reaction_date"] == "2025-04-18"
+    assert payload["reaction_shift_trading_days"] == 1

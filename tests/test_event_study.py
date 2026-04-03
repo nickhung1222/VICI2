@@ -112,3 +112,25 @@ class TestRunEventStudy:
         assert len(result["relative_days"]) == 6  # [-2, -1, 0, 1, 2, 3]
         assert result["relative_days"][0] == -2
         assert result["relative_days"][-1] == 3
+
+    def test_reaction_shift_uses_next_trading_day_as_t0(self):
+        stock_r, market_r, dates = _make_synthetic_data(300)
+        event_date = dates[200]
+        result = run_event_study(
+            stock_returns=stock_r,
+            market_returns=market_r,
+            dates=dates,
+            event_dates=[event_date],
+            reaction_shift_trading_days=1,
+        )
+
+        assert result["n_events"] == 1
+        assert result["event_dates_used"] == [event_date]
+        assert result["reaction_dates_used"] == [dates[201]]
+        assert result["aligned_events"] == [
+            {
+                "announcement_date": event_date,
+                "reaction_date": dates[201],
+                "reaction_shift_trading_days": 1,
+            }
+        ]

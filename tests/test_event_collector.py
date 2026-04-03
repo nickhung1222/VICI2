@@ -59,7 +59,7 @@ def test_collect_event_records_returns_structured_payload(monkeypatch):
             "snippet": "外資聚焦資本支出。",
             "news_id": "",
             "source_article_id": "",
-            "retrieval_method": "goodinfo_stock_date_index",
+            "retrieval_method": "goodinfo_http_index",
             "is_primary_source": False,
             "dedupe_key": "https://example.com/b",
         },
@@ -104,6 +104,77 @@ def test_collect_event_records_returns_structured_payload(monkeypatch):
     assert payload["records"][0]["summary"].startswith("Q1 營收與毛利率展望")
     assert payload["data_completeness"]["official_sources_included"] is False
     assert payload["record_breakdown"]["archive_records"] >= 1
+
+
+def test_collect_event_records_clamps_pre_event_report_window(monkeypatch):
+    captured = {}
+
+    def fake_search_news(query, date_from, date_to, max_results, **kwargs):
+        captured["date_from"] = date_from
+        captured["date_to"] = date_to
+        captured["primary_source"] = kwargs.get("primary_source")
+        captured["allow_secondary_sources"] = kwargs.get("allow_secondary_sources")
+        return {"articles": [], "data_gaps": [], "source_breakdown": {}}
+
+    monkeypatch.setattr("tools.event_collector.search_news", fake_search_news)
+    monkeypatch.setattr("tools.event_collector.fetch_article_content", lambda **kwargs: "")
+    monkeypatch.setattr(
+        "tools.event_collector.collect_official_event_records",
+        lambda **kwargs: {"records": [], "data_gaps": []},
+    )
+
+    collect_event_records(
+        symbol="2330",
+        stock_name="台積電",
+        event_type="法說會",
+        start_date="2024-01-01",
+        end_date="2024-04-18",
+        event_date="2024-04-18",
+        event_key="2024Q1",
+        max_results=5,
+        pre_event_report_days=7,
+        primary_source="goodinfo",
+        allow_secondary_sources=False,
+    )
+
+    assert captured["date_from"] == "2024-04-11"
+    assert captured["date_to"] == "2024-04-17"
+    assert captured["primary_source"] == "goodinfo"
+    assert captured["allow_secondary_sources"] is False
+
+
+def test_collect_event_records_reports_no_news_for_strict_goodinfo_only(monkeypatch):
+    monkeypatch.setattr(
+        "tools.event_collector.search_news",
+        lambda **kwargs: {
+            "articles": [],
+            "data_gaps": ["goodinfo_http_empty", "goodinfo_browser_empty", "no_news_in_interval"],
+            "source_breakdown": {"primary_count": 0, "secondary_count": 0, "merged_count": 0},
+        },
+    )
+    monkeypatch.setattr("tools.event_collector.fetch_article_content", lambda **kwargs: "")
+    monkeypatch.setattr(
+        "tools.event_collector.collect_official_event_records",
+        lambda **kwargs: {"records": [], "data_gaps": []},
+    )
+
+    payload = collect_event_records(
+        symbol="2454.TW",
+        stock_name="聯發科",
+        event_type="法說會",
+        start_date="2023-01-01",
+        end_date="2023-02-03",
+        event_date="2023-02-03",
+        event_key="2022Q4",
+        max_results=20,
+        pre_event_report_days=7,
+        primary_source="goodinfo",
+        allow_secondary_sources=False,
+    )
+
+    assert payload["record_count"] == 0
+    assert "no_news_in_interval" in payload["data_completeness"]["data_gaps"]
+    assert "該區間沒有新聞" in payload["data_completeness"]["notes"]
 
 
 def test_collect_event_records_includes_official_sources(monkeypatch):
