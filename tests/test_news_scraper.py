@@ -51,7 +51,7 @@ def test_search_news_uses_web_fallback_when_primary_sources_fail(monkeypatch):
 
     assert len(results) == 1
     assert results[0]["source"] == "ctee"
-    assert results[0]["title"] == "台積電法說會重點整理"
+    assert results[0]["headline"] == "台積電法說會重點整理"
 
 
 def test_search_news_stays_empty_for_strict_goodinfo_only(monkeypatch):

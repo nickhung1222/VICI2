@@ -13,7 +13,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from tools.expectation_analysis import SUPPORTED_METRICS, extract_metric_observations
-from tools.schemas import classify_event_phase, infer_record_flags
+from tools.schemas import classify_event_phase, compact_text, dedupe_strings, infer_record_flags
 
 _MOPS_OV_EVENT_URL = "https://mopsov.twse.com.tw/mops/web/ajax_t100sb07_1"
 _MOPS_OV_PAGE_URL = "https://mopsov.twse.com.tw/mops/web/t100sb07_1"
@@ -200,7 +200,7 @@ def collect_official_event_records(
     if synthesized_record:
         records.append(synthesized_record)
 
-    data_gaps = _dedupe_preserve_order(
+    data_gaps = dedupe_strings(
         artifact_gaps
         + list(digest_payload.get("data_gaps", []))
     )
@@ -360,7 +360,7 @@ def collect_official_event_artifacts(
     if not any(artifact.get("artifact_type") == "transcript" and artifact.get("retrieval_status") == "ok" for artifact in artifacts):
         data_gaps.append("transcript_missing")
 
-    return artifacts, _dedupe_preserve_order(data_gaps)
+    return artifacts, dedupe_strings(data_gaps)
 
 
 def build_earnings_digest(
@@ -411,7 +411,7 @@ def build_earnings_digest(
         "event_date": event_date,
         "event_key": event_key,
     }
-    digest["data_gaps"] = _dedupe_preserve_order(data_gaps)
+    digest["data_gaps"] = dedupe_strings(data_gaps)
     return {
         "earnings_digest": digest,
         "data_gaps": digest["data_gaps"],
@@ -458,7 +458,7 @@ def extract_financial_snapshot(*, artifacts: list[dict[str, Any]], event_key: st
                 "value_low": observation.get("value_low"),
                 "value_high": observation.get("value_high"),
                 "unit": observation.get("unit", ""),
-                "evidence_span": compact_excerpt(evidence, max_length=220),
+                "evidence_span": compact_text(evidence, max_length=220),
                 "source_ref": artifact.get("url", ""),
                 "source_artifact_type": artifact.get("artifact_type", ""),
                 "source_name": artifact.get("source_name", ""),
@@ -474,7 +474,7 @@ def extract_financial_snapshot(*, artifacts: list[dict[str, Any]], event_key: st
 
     return {
         "metrics": by_metric,
-        "data_gaps": _dedupe_preserve_order(data_gaps),
+        "data_gaps": dedupe_strings(data_gaps),
     }
 
 
@@ -513,7 +513,7 @@ def extract_management_tone(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
     for _, sentence, artifact in sorted(scored_sentences, key=lambda item: item[0], reverse=True)[:3]:
         evidence_rows.append(
             {
-                "excerpt": compact_excerpt(sentence, max_length=220),
+                "excerpt": compact_text(sentence, max_length=220),
                 "source_ref": artifact.get("url", ""),
                 "source_artifact_type": artifact.get("artifact_type", ""),
                 "source_name": artifact.get("source_name", ""),
@@ -587,7 +587,7 @@ def build_mops_artifact(
     mops_record: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the baseline MOPS artifact."""
-    excerpt = compact_excerpt(mops_record.get("summary", ""), max_length=220)
+    excerpt = compact_text(mops_record.get("summary", ""), max_length=220)
     return {
         "stock_code": stock_code,
         "company": stock_name,
@@ -655,7 +655,7 @@ def fetch_official_artifact(
         artifact["_validation_gaps"].append("pdf_text_extraction_failed")
     artifact["title"] = title
     artifact["content"] = content
-    artifact["excerpt"] = compact_excerpt(content, max_length=220)
+    artifact["excerpt"] = compact_text(content, max_length=220)
     artifact["language"] = _detect_language(f"{title} {content}")
     artifact["retrieval_status"] = "ok" if content or artifact["format"] == "webcast_replay" else "ok"
     validation = validate_artifact(
@@ -715,13 +715,6 @@ def serialize_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
         if key not in {"content", "_validation_gaps"}
     }
 
-
-def compact_excerpt(text: str, max_length: int = 220) -> str:
-    """Compact text for source excerpt fields."""
-    compacted = " ".join(str(text).split())
-    if len(compacted) <= max_length:
-        return compacted
-    return compacted[: max_length - 1].rstrip() + "…"
 
 
 def _empty_earnings_digest() -> dict[str, Any]:
@@ -800,9 +793,9 @@ def _extract_pdf_text(raw_bytes: bytes) -> str:
 def _build_official_takeaways(artifacts: list[dict[str, Any]], *, fallback_summary: str) -> list[str]:
     takeaways: list[str] = []
     if fallback_summary:
-        takeaways.append(compact_excerpt(fallback_summary, max_length=160))
+        takeaways.append(compact_text(fallback_summary, max_length=160))
     for artifact in artifacts:
-        excerpt = compact_excerpt(artifact.get("excerpt", ""), max_length=160)
+        excerpt = compact_text(artifact.get("excerpt", ""), max_length=160)
         if excerpt and excerpt not in takeaways:
             takeaways.append(excerpt)
         if len(takeaways) >= 5:
@@ -842,9 +835,9 @@ def _extract_qa_topics_from_text(text: str, artifact: dict[str, Any]) -> list[di
         topics.append(
             {
                 "topic": _infer_qa_topic(question_text, answer_text),
-                "question_summary": compact_excerpt(question_text, max_length=140),
-                "answer_summary": compact_excerpt(answer_text, max_length=180),
-                "evidence": compact_excerpt(paragraph, max_length=220),
+                "question_summary": compact_text(question_text, max_length=140),
+                "answer_summary": compact_text(answer_text, max_length=180),
+                "evidence": compact_text(paragraph, max_length=220),
                 "source_ref": artifact.get("url", ""),
                 "source_artifact_type": artifact.get("artifact_type", ""),
                 "source_name": artifact.get("source_name", ""),
@@ -928,12 +921,3 @@ def _parse_mops_date(raw: str) -> str:
     return datetime(western_year, int(month), int(day)).strftime("%Y-%m-%d")
 
 
-def _dedupe_preserve_order(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        deduped.append(item)
-    return deduped

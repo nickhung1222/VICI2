@@ -44,7 +44,7 @@ def test_dedupe_news_articles_uses_normalized_keys():
 
 def test_fetch_news_archive_merges_primary_and_secondary(monkeypatch):
     monkeypatch.setattr(
-        "tools.news_archive.fetch_cnyes_primary_records",
+        "tools.news_archive._fetch_cnyes_symbol_news_as_normalized",
         lambda **kwargs: [
             normalize_news_article(
                 source="cnyes",
@@ -52,7 +52,7 @@ def test_fetch_news_archive_merges_primary_and_secondary(monkeypatch):
                 published_at="2025-01-15",
                 headline="台積電法說會",
                 url="https://news.cnyes.com/news/id/123",
-                retrieval_method="cnyes_category",
+                retrieval_method="cnyes_symbol_news",
                 is_primary_source=True,
             )
         ],

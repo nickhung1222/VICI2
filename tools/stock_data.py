@@ -4,7 +4,6 @@ Uses yfinance as primary source (Taiwan stocks use .TW suffix).
 Falls back to TWSE open data CSV for reliability.
 """
 
-import time
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -67,9 +66,3 @@ def fetch_stock_data(symbol: str, start_date: str, end_date: str) -> dict:
         "stock_close": stock_close.loc[common_return_dates].values.tolist(),
         "market_close": market_close.loc[common_return_dates].values.tolist(),
     }
-
-
-def get_trading_calendar(symbol: str, start_date: str, end_date: str) -> list[str]:
-    """Return list of trading dates for a given symbol."""
-    df = yf.download(symbol, start=start_date, end=end_date, auto_adjust=True, progress=False)
-    return [d.strftime("%Y-%m-%d") for d in df.index]

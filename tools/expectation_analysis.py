@@ -15,6 +15,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from tools.schemas import dedupe_strings
+
 SUPPORTED_METRICS = ("revenue", "gross_margin", "operating_margin", "eps", "capex", "guidance")
 
 _METRIC_ALIASES: dict[str, tuple[str, ...]] = {
@@ -227,7 +229,7 @@ def analyze_expectation_vs_actual(
         "status_counts": dict(status_counts),
         "summary": _summarize_metric_statuses(status_counts),
         "comparison_summary": _summarize_metric_statuses(status_counts),
-        "data_gaps": _dedupe_preserve_order(data_gaps),
+        "data_gaps": dedupe_strings(data_gaps),
         "hybrid_enabled": bool(os.environ.get("GEMINI_API_KEY")),
         "hybrid_error": hybrid_error,
     }
@@ -647,15 +649,6 @@ def _coerce_number(value: Any) -> float | None:
     return None
 
 
-def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result
 
 
 def _summarize_metric_statuses(status_counts: Counter) -> str:

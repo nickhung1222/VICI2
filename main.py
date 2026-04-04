@@ -68,7 +68,8 @@ def main():
 
     args = parser.parse_args()
 
-    from agent import event_collect, event_report, event_study, heat_scan, news_scan
+    from agent import event_study, news_scan
+    from pipeline import event_collect, event_report, heat_scan
 
     if args.mode == "event_collect":
         if not args.stock:

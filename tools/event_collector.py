@@ -115,11 +115,11 @@ def collect_event_records(
                 secondary_count += 1
             else:
                 live_fetched_count += 1
-        if len(dedupe_records(ranked_articles, ["url", "title", "date"])) >= max_results:
+        if len(dedupe_records(ranked_articles, ["url", "headline", "published_at"])) >= max_results:
             break
 
-    ranked_articles.sort(key=lambda item: (-item["_score"], item.get("date", ""), item.get("title", "")))
-    ranked_articles = dedupe_records(ranked_articles, ["url", "title", "date"])
+    ranked_articles.sort(key=lambda item: (-item["_score"], item.get("published_at", ""), item.get("headline", "")))
+    ranked_articles = dedupe_records(ranked_articles, ["url", "headline", "published_at"])
     selected_articles = ranked_articles[:max_results]
 
     records: list[dict[str, Any]] = list(official_payload["records"])
@@ -127,19 +127,19 @@ def collect_event_records(
         content = ""
         # Avoid long report latency when fallback results come from arbitrary web pages.
         # Only fetch full text for the first few articles when we have a direct cnyes id.
-        if index < 2 and (article.get("news_id") or article.get("source") in {"cnyes", "moneydj"}):
+        if index < 2 and (article.get("source_article_id") or article.get("source") in {"cnyes", "moneydj"}):
             content = fetch_article_content(
                 url=article.get("url", ""),
-                news_id=article.get("news_id", ""),
+                news_id=article.get("source_article_id", ""),
             )
 
         summary_source = content or article.get("snippet", "")
         article_type = _classify_article_type(
             event_type=event_type,
-            title=article.get("title", ""),
+            title=article.get("headline", ""),
             snippet=article.get("snippet", ""),
         )
-        article_date = article.get("date", "")
+        article_date = article.get("published_at", "")
         event_phase = classify_event_phase(article_date=article_date, event_date=event_date)
         record_flags = infer_record_flags(
             event_phase=event_phase,
@@ -160,12 +160,12 @@ def collect_event_records(
                 "source_type": "media",
                 "source_name": article.get("source", ""),
                 "source_url": article.get("url", ""),
-                "headline": article.get("title", ""),
+                "headline": article.get("headline", ""),
                 "summary": compact_text(summary_source, max_length=200),
                 "language": "zh-TW",
                 "matched_query": article.get("matched_query", ""),
-                "source_article_id": article.get("source_article_id", article.get("news_id", "")),
-                "published_at": article.get("date", ""),
+                "source_article_id": article.get("source_article_id", ""),
+                "published_at": article.get("published_at", ""),
                 "retrieval_method": article.get("retrieval_method", ""),
                 "is_primary_source": article.get("is_primary_source", False),
                 "dedupe_key": article.get("dedupe_key", ""),
@@ -363,9 +363,9 @@ def _classify_article_type(event_type: str, title: str, snippet: str) -> str:
 
 def _score_article(article: dict[str, Any], target: dict[str, str], event_type: str, event_date: str) -> float:
     """Rank articles by stock/event match strength and date proximity."""
-    title = article.get("title", "")
+    title = article.get("headline", "")
     snippet = article.get("snippet", "")
-    article_date = article.get("date", "")
+    article_date = article.get("published_at", "")
     text = f"{title} {snippet}"
     score = 0.0
 

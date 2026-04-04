@@ -1,4 +1,4 @@
-> 📅 **最後更新**：2026-04-03　｜　由 Claude 根據專案掃描自動整理，如需更新請直接告知。
+> 📅 **最後更新**：2026-04-04　｜　由 Claude 根據專案掃描自動整理，如需更新請直接告知。
 
 ---
 
@@ -47,8 +47,8 @@ VICI2 是一個台灣財經新聞事件研究 Agent，以 LLM 作為 Orchestrato
 - 結構化事件蒐集（event-first collector，第一階段重構）
 - 法說會官方來源蒐集（MOPS + IR artifacts）
 - 法說會 verified digest（`official_artifacts` / `earnings_digest` / `todo_items`）
-- 新聞抓取（法說會目前優先使用 Goodinfo 個股日期索引；其他事件仍可用 Cnyes、Google News RSS、yfinance）
-- 獨立 Cnyes 個股新聞區間查詢（`tools/cnyes_stock_news.py`，不接入主流程）
+- 新聞抓取（法說會使用 Goodinfo 個股日期索引；其他事件使用 Cnyes symbol news API，兩者皆以 normalized record schema 輸出；關鍵字 fallback 走 Cnyes 搜尋 + Google News RSS）
+- 獨立 Cnyes 個股新聞區間查詢（`tools/cnyes_stock_news.py`，也作為主流程主要來源整合）
 - 中文情緒分析（看多 / 看空 / 中性）
 - 事件研究計算（AR / CAR，市場模型 OLS）
 - 圖表產生與 Markdown 報告輸出
@@ -61,19 +61,21 @@ LLM Provider：**Google Gemini**（`gemini-2.0-flash`），透過 `google-genai`
 
 ```
 VICI2/
-├── agent.py          # LLM Orchestrator：tool use loop（核心邏輯）
+├── agent.py          # Gemini LLM tool-use loop（僅 event_study / news_scan 模式）
+├── pipeline.py       # 確定性 pipeline（event_collect / heat_scan / event_report）
 ├── main.py           # CLI 入口
 ├── tools/            # 各功能模組
-│   ├── event_collector.py # 結構化事件蒐集（Phase 1）
-│   ├── event_sources.py   # 法說會官方來源、artifact 發現與 digest
+│   ├── event_collector.py    # 結構化事件蒐集（Phase 1）
+│   ├── event_sources.py      # 法說會官方來源、artifact 發現與 digest
 │   ├── earnings_validation.py # 法說會固定 gold sample 與 regression summary helper
-│   ├── cnyes_stock_news.py # 獨立 Cnyes 個股新聞區間查詢
-│   ├── schemas.py        # schema 與 normalization helper
-│   ├── news_scraper.py   # 新聞抓取
-│   ├── stock_data.py     # 台股股價（yfinance）
-│   ├── event_study.py    # AR / CAR 計算
-│   ├── chart.py          # 圖表產生（matplotlib）
-│   └── report.py         # 報告儲存
+│   ├── cnyes_stock_news.py   # Cnyes 個股新聞區間查詢（standalone + 整合進主流程）
+│   ├── news_archive.py       # normalized 新聞主庫：整合 cnyes symbol news + Goodinfo
+│   ├── schemas.py            # schema 與 normalization helper
+│   ├── news_scraper.py       # 新聞抓取（關鍵字路徑：Cnyes 搜尋 + Google News RSS）
+│   ├── stock_data.py         # 台股股價（yfinance）
+│   ├── event_study.py        # AR / CAR 計算
+│   ├── chart.py              # 圖表產生（matplotlib）
+│   └── report.py             # 報告儲存與組裝
 ├── prompts/
 │   ├── system.md         # Agent 系統提示
 │   └── report_format.md  # 報告格式模板
@@ -113,13 +115,31 @@ python main.py --mode event_collect \
     --end-date 2025-04-17 \
     --event-date 2025-04-17
 
-# Event Study 模式（完整流程）
+# Heat Scan 模式（事件前熱度分析）
+python main.py --mode heat_scan \
+    --stock 2330.TW \
+    --stock-name 台積電 \
+    --event-type 法說會 \
+    --event-date 2025-04-17 \
+    --event-key 2025Q1
+
+# Event Report 模式（整合報告）
+python main.py --mode event_report \
+    --stock 2330.TW \
+    --stock-name 台積電 \
+    --event-type 法說會 \
+    --start-date 2025-04-01 \
+    --end-date 2025-04-18 \
+    --event-date 2025-04-17 \
+    --event-key 2025Q1
+
+# Event Study 模式（LLM 驅動：新聞 → 情緒 → AR/CAR → 圖表 → 報告）
 python main.py --mode event_study \
     --stock 2330.TW \
     --event-dates 2025-01-16,2025-04-17 \
     --topic "TSMC法說會"
 
-# News Scan 模式（舊版 query-first 掃描）
+# News Scan 模式（LLM 驅動：query-first 掃描）
 python main.py --mode news_scan --query "央行升息" --days 30
 
 # Standalone Cnyes Stock News（獨立模組）
@@ -145,18 +165,35 @@ GEMINI_MODEL=gemini-2.0-flash
 
 ---
 
-## Agent 工作流程
+## 架構說明
 
-`agent.py` 實作 LLM tool use loop，Gemini 自行決定呼叫工具的順序。
+### 兩條執行路徑
+
+| 檔案 | 模式 | 特性 |
+|------|------|------|
+| `agent.py` | `event_study`、`news_scan` | LLM 驅動，Gemini 決定工具呼叫順序 |
+| `pipeline.py` | `event_collect`、`heat_scan`、`event_report` | 確定性，直接呼叫工具，輸出可重現 |
+
+`main.py` 分別從兩個模組 import，路由到對應的執行路徑。
+
+### 新聞來源整合
+
+- **有 stock_code**（主流程）：`tools/news_archive.py` 整合兩個主要來源：
+  - **Cnyes symbol news API**（`cnyes_stock_news.py`）：近期約 2 個月，精準個股新聞
+  - **Goodinfo**：長期歷史，法說會事件優先使用
+  - 兩者輸出統一的 normalized record schema（`headline` / `published_at` / `source_article_id`）
+- **關鍵字查詢**（無 stock_code）：`news_scraper.py` fallback 路徑，使用：
+  - Cnyes 搜尋 API
+  - Google News RSS
 
 ### Event Collect 模式（第一階段重構）
-1. `event_collect()` 呼叫 `tools/event_collector.py`
+1. `event_collect()` 在 `pipeline.py` 呼叫 `tools/event_collector.py`
 2. 將股票、事件類型、日期範圍正規化為 collection plan
 3. 對 `法說會` 先走 `tools/event_sources.py` 收集 MOPS record、IR artifacts、verified digest 與 todo
-4. 再透過現有新聞來源收集結構化 event/news records
+4. 再透過 `tools/news_archive.py` 收集 normalized event/news records
 5. 使用 `save_event_record()` 輸出 JSON 到 `outputs/events/`
 
-### Event Study 模式（7 步驟）
+### Event Study 模式（7 步驟，LLM 驅動）
 1. `scrape_news` — 搜尋事件主題相關新聞
 2. `fetch_article_content` — 取得前 5 篇完整文章
 3. 情緒分析（LLM 直接推論，無額外工具）
@@ -165,20 +202,27 @@ GEMINI_MODEL=gemini-2.0-flash
 6. `generate_chart` — 產生 CAR 走勢圖（PNG）
 7. `save_report` — 輸出 Markdown 報告到 `outputs/reports/`
 
-### News Scan 模式（簡化流程）
+### News Scan 模式（簡化流程，LLM 驅動）
 1. `scrape_news` → 2. `fetch_article_content` → 3. 情緒分析 → 4. `save_report`
 
 ---
 
 ## 工具模組說明
 
+### `tools/news_archive.py`
+- `fetch_news_archive(...)` — 整合 cnyes symbol news + Goodinfo，輸出 normalized records
+- `_fetch_cnyes_symbol_news_as_normalized(...)` — 以 `cnyes_stock_news.py` 為資料源，轉換成統一 schema
+- normalized record 欄位：`headline`, `published_at`, `source_article_id`, `url`, `source`, `snippet`, `retrieval_method`, `is_primary_source`
+
 ### `tools/news_scraper.py`
-- `search_news(query, date_from, date_to, max_results)` — 搜尋鉅亨網 + MoneyDJ
+- `search_news(query, date_from, date_to, max_results, stock_code, ...)` — 有 stock_code 走 archive 路徑；無 stock_code 走關鍵字 fallback（Cnyes + Google News RSS）
 - `fetch_article_content(url, news_id)` — 取得文章全文（優先用 cnyes news_id API）
+- 已移除不穩定來源：MoneyDJ RSS、DuckDuckGo HTML
 
 ### `tools/cnyes_stock_news.py`
-- `fetch_cnyes_stock_news(stock, date_from, date_to, stock_name="", match_mode="balanced", max_results=200)` — 獨立抓取鉅亨個股新聞區間結果
-- `python -m tools.cnyes_stock_news ...` — 輸出 JSON，包含 `published_at`、`title`、`url`、`relevance`
+- `fetch_cnyes_stock_news(stock, date_from, date_to, stock_name="", match_mode="balanced", max_results=200)` — 抓取鉅亨個股新聞區間結果
+- `python -m tools.cnyes_stock_news ...` — standalone CLI，輸出 JSON（`published_at`、`title`、`url`、`relevance`）
+- 覆蓋範圍：近期約 2 個月；超過 2 個月由 Goodinfo 補充
 
 ### `tools/event_collector.py`
 - `collect_event_records(...)` — 以事件導向輸入建立結構化事件紀錄
@@ -211,6 +255,7 @@ GEMINI_MODEL=gemini-2.0-flash
 ### `tools/report.py`
 - `save_report(content, topic)` — 儲存 Markdown 到 `outputs/reports/`
 - `save_event_record(...)` — 儲存單次事件記錄
+- `build_event_report_payload(...)` — 組裝 JSON 格式的完整事件報告
 
 ---
 
@@ -226,9 +271,13 @@ GEMINI_MODEL=gemini-2.0-flash
 - tool 執行結果以 JSON 字串回傳給 LLM（`json.dumps(... ensure_ascii=False)`）
 - 工具輸出過長時截斷（例如文章內容截斷至 5000 字元）
 - 新的 collector 邏輯優先輸出固定 schema，避免把 source selection 留給 prompt 決定
+- normalized record 統一使用 `headline` / `published_at` / `source_article_id`（不使用舊版 `title` / `date` / `news_id`）
 
-### 新增工具
+### 新增工具（LLM 模式）
 在 `agent.py` 的 `TOOLS` 清單新增 JSON Schema 定義，再在 `execute_tool()` 加入對應的 `elif` 分支。Gemini schema 需透過 `_to_gemini_schema()` 轉換（type 要大寫）。
+
+### 新增確定性步驟
+在 `pipeline.py` 新增或修改函數；若需要新工具函數，放在對應的 `tools/` 模組，再從 `pipeline.py` 呼叫。
 
 ### Skill 與 Repo 的邊界
 - `stock-event-timeline` 只作為設計參考與研究 workflow 規格
@@ -258,7 +307,13 @@ pytest tests/
 修改 `.env` 中的 `GEMINI_MODEL`，例如改為 `gemini-1.5-pro`。
 
 **Q：`event_collect` 和 `news_scan` 差在哪裡？**
-`event_collect` 是 event-first，輸出結構化 JSON，適合作為後續分析上游資料；`news_scan` 是舊版 query-first 掃描，適合快速臨時查詢。
+`event_collect` 是 event-first，輸出結構化 JSON，由 `pipeline.py` 確定性執行，適合作為後續分析上游資料；`news_scan` 是 LLM 驅動的 query-first 掃描，適合快速臨時查詢。
+
+**Q：cnyes_stock_news 只能查近 2 個月嗎？**
+cnyes symbol news API 覆蓋近期約 2 個月。超過範圍時，`news_archive.py` 會自動以 Goodinfo 補充；也可以直接用 `python -m tools.cnyes_stock_news` 獨立查詢。
 
 **Q：獨立的鉅亨個股新聞查詢要走哪裡？**
-使用 `python -m tools.cnyes_stock_news --stock <code> --date-from YYYY-MM-DD --date-to YYYY-MM-DD`。這個入口不接入 `main.py` 既有 mode，也不影響 event/report 主流程。
+使用 `python -m tools.cnyes_stock_news --stock <code> --date-from YYYY-MM-DD --date-to YYYY-MM-DD`。這個入口也被 `news_archive.py` 整合進主流程，作為 stock_code 路徑的主要來源之一。
+
+**Q：`agent.py` 和 `pipeline.py` 差在哪裡？**
+`agent.py` 只處理 LLM tool-use 模式（`event_study`、`news_scan`），由 Gemini 決定工具呼叫順序。`pipeline.py` 處理確定性 pipeline 模式（`event_collect`、`heat_scan`、`event_report`），每一步都是固定的，不依賴 LLM。

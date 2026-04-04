@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agent import _build_event_study_payload
+from pipeline import _build_event_study_payload
 from tools.report import build_event_report_payload, render_event_report_markdown
 
 
@@ -320,8 +320,8 @@ def test_build_event_study_payload_extends_price_window_for_post_event_days():
             "reaction_shift_trading_days": kwargs.get("reaction_shift_trading_days", 0),
         }
 
-    with patch("agent.fetch_stock_data", side_effect=fake_fetch_stock_data), patch(
-        "agent.run_event_study", side_effect=fake_run_event_study
+    with patch("pipeline.fetch_stock_data", side_effect=fake_fetch_stock_data), patch(
+        "pipeline.run_event_study", side_effect=fake_run_event_study
     ):
         payload = _build_event_study_payload(
             stock="2330.TW",

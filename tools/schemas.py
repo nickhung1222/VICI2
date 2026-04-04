@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -128,10 +129,21 @@ def infer_record_flags(
 
 def compact_text(text: str, max_length: int = 200) -> str:
     """Collapse whitespace and trim text for structured summaries."""
-    compacted = " ".join(text.split())
+    compacted = " ".join(str(text).split())
     if len(compacted) <= max_length:
         return compacted
     return compacted[: max_length - 1].rstrip() + "…"
+
+
+def dedupe_strings(items: Iterable[str]) -> list[str]:
+    """Deduplicate a sequence of strings while preserving order."""
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
 
 
 def dedupe_records(records: list[dict[str, Any]], key_fields: list[str]) -> list[dict[str, Any]]:

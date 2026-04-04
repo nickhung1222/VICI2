@@ -458,6 +458,51 @@ def dedupe_news_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]
     return deduped
 
 
+def _fetch_cnyes_symbol_news_as_normalized(
+    *,
+    stock_code: str,
+    stock_name: str,
+    date_from: str,
+    date_to: str,
+    max_results: int,
+    data_gaps: list[str],
+) -> list[dict[str, Any]]:
+    """Call cnyes_stock_news and convert results to normalized archive record format."""
+    from tools.cnyes_stock_news import fetch_cnyes_stock_news
+    try:
+        result = fetch_cnyes_stock_news(
+            stock=stock_code,
+            date_from=date_from,
+            date_to=date_to,
+            stock_name=stock_name,
+            match_mode="balanced",
+            max_results=max_results,
+        )
+    except Exception as exc:
+        data_gaps.append(f"cnyes_symbol_news_unavailable:{type(exc).__name__}")
+        return []
+
+    for gap in result.get("data_gaps", []):
+        if gap and gap not in data_gaps:
+            data_gaps.append(gap)
+
+    records: list[dict[str, Any]] = []
+    for item in result.get("records", []):
+        records.append(
+            normalize_news_article(
+                source="cnyes",
+                source_article_id=item.get("news_id", ""),
+                published_at=item.get("published_at", "")[:10],
+                headline=item.get("title", ""),
+                url=item.get("url", ""),
+                retrieval_method="cnyes_symbol_news",
+                is_primary_source=True,
+                stock_code=stock_code,
+            )
+        )
+    return records
+
+
 def fetch_news_archive(
     *,
     stock_code: str,
@@ -499,17 +544,27 @@ def fetch_news_archive(
     data_gaps: list[str] = []
 
     if primary_source == "cnyes":
-        try:
-            primary_records = fetch_cnyes_primary_records(
+        if stock_code:
+            primary_records = _fetch_cnyes_symbol_news_as_normalized(
                 stock_code=stock_code,
                 stock_name=stock_name,
                 date_from=date_from,
                 date_to=date_to,
                 max_results=max_results,
+                data_gaps=data_gaps,
             )
-        except Exception as exc:
-            data_gaps.append(f"cnyes_primary_unavailable:{type(exc).__name__}")
-            primary_records = []
+        else:
+            try:
+                primary_records = fetch_cnyes_primary_records(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    date_from=date_from,
+                    date_to=date_to,
+                    max_results=max_results,
+                )
+            except Exception as exc:
+                data_gaps.append(f"cnyes_primary_unavailable:{type(exc).__name__}")
+                primary_records = []
     elif primary_source == "goodinfo":
         try:
             primary_records = fetch_goodinfo_discovery_records(

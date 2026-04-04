@@ -111,46 +111,31 @@ python -m tools.cnyes_stock_news \
 
 ---
 
-## 重構方向
+## 架構
 
-目前專案同時存在兩條資料路徑：
+### 兩條執行路徑
 
-- `news_scan`：query-first，適合臨時掃描，但對事件研究的可重現性較弱
-- `tools.cnyes_stock_news`：獨立的 Cnyes 個股新聞區間查詢，不改動既有 event/report workflow
-- `event_collect`：event-first，將股票、事件類型、日期範圍正規化後輸出結構化 JSON
-- `heat_scan`：針對指定事件輸出結構化熱度分析
-- `event_report`：把事件蒐集、熱度與 hybrid 預期 vs 實際整合成 JSON + Markdown
+| 模組 | 負責模式 | 特性 |
+|------|---------|------|
+| `agent.py` | `event_study`、`news_scan` | LLM（Gemini）驅動，決定工具呼叫順序 |
+| `pipeline.py` | `event_collect`、`heat_scan`、`event_report` | 確定性執行，每步固定，輸出可重現 |
 
-第一階段重構已新增 `event_collect`，目標是讓後續的情緒分析、熱度分析與 event study 都能建立在固定 schema 上，而不是直接依賴 prompt 驅動的新聞搜尋。
+`main.py` 依模式分別從兩個模組 import，路由到對應執行路徑。
 
-目前 `event_collect`、`heat_scan` 與 `event_report` 對 `法說會` 都先固定使用 Goodinfo 作為新聞來源，並套用 `D-7 ~ D-1` 的事件前視窗，不混入法說會當天新聞。
+### 新聞來源整合
 
-目前 `法說會` 的官方資料層已擴充為：
+- **有 stock_code（主流程）**：`news_archive.py` 整合兩個主要來源，輸出統一 normalized schema：
+  - **Cnyes symbol news API**（`cnyes_stock_news.py`）：近期約 2 個月的精準個股新聞
+  - **Goodinfo**：長期歷史索引，法說會事件優先使用
+- **關鍵字查詢（無 stock_code）**：`news_scraper.py` fallback 路徑，使用 Cnyes 搜尋 API + Google News RSS
+- Normalized record 欄位：`headline` / `published_at` / `source_article_id`（已統一，不使用舊版 `title` / `date` / `news_id`）
+
+### 法說會資料層
 
 - `MOPS`：事件日期、公告摘要、官方頁連結
 - `IR artifacts`：presentation / earnings release / management report / transcript / webcast replay
-- `earnings_digest`：只保留帶 evidence 與 source_ref 的 verified metrics / tone / Q&A
-- `todo_items`：把 blocking / non_blocking 缺口一起存下，方便後續回補
-
-Goodinfo 在主流程中的定位是「索引入口」，不是全文主庫：
-- 先從 Goodinfo 取得日期、來源、標題與原始連結
-- 再由原始新聞站補正文
-- 若 Goodinfo 的 HTTP 路徑結果不足，會自動降級到 Playwright browser fallback，但仍以 10 秒內完成單次查詢為目標
-
-目前比較策略已明確拆分：
-
-- `法說會` 等 recurring event：預設比去年同一事件，例如 `2025Q4` 對 `2024Q4`
-- `重大消息`、一次性事件：維持比事件前 `1~7` 天對更早一段期間的週平均
-
-對 recurring event，建議在 `event_collect` 明確帶入 `--event-key`，避免用法說日期誤推季度。
-
-目前 `event_report` 的 `event_study` 為 deterministic optional block；不開啟 `--include-event-study` 時，仍會正常產出事件報告。
-
-針對台股 `法說會`，目前 `event_report --include-event-study` 預設會把法說會日期視為公告日，並以**下一個交易日**作為市場反應日 `t=0`，避免把盤後公布資訊錯置到同日報酬。
-
-`stock-event-timeline` skill 現在只作為設計參考，不是執行時依賴。拆分規格見：
-
-- `STOCK_EVENT_TIMELINE_SPEC.md`
+- `earnings_digest`：只保留帶 `evidence/source_ref` 的 verified metrics / management tone / Q&A
+- `todo_items`：blocking / non_blocking 缺口，方便後續回補
 
 ---
 
@@ -158,22 +143,23 @@ Goodinfo 在主流程中的定位是「索引入口」，不是全文主庫：
 
 ```
 VICI2/
-├── agent.py          # LLM Orchestrator（tool use loop）
+├── agent.py          # Gemini LLM tool-use loop（event_study / news_scan）
+├── pipeline.py       # 確定性 pipeline（event_collect / heat_scan / event_report）
 ├── main.py           # CLI 入口
 ├── tools/
-│   ├── event_collector.py # 結構化事件蒐集（第一階段重構）
-│   ├── heat_analysis.py   # 事件前熱度分析與比較策略
+│   ├── event_collector.py    # 結構化事件蒐集（第一階段重構）
+│   ├── heat_analysis.py      # 事件前熱度分析與比較策略
 │   ├── expectation_analysis.py # 預期 vs 實際比較
-│   ├── cnyes_stock_news.py # 獨立 Cnyes 個股新聞區間查詢 CLI / module
-│   ├── schemas.py        # 統一 schema 與 normalization helper
-│   ├── news_archive.py   # normalized 新聞主庫/索引/補充來源整合
-│   ├── news_scraper.py   # 新聞抓取與 legacy fallback 介面
-│   ├── event_sources.py  # 官方來源 adapter（目前含 MOPS 法說會）
+│   ├── cnyes_stock_news.py   # Cnyes 個股新聞區間查詢（standalone + 整合進主流程）
+│   ├── schemas.py            # 統一 schema 與 normalization helper
+│   ├── news_archive.py       # normalized 新聞主庫：cnyes symbol news + Goodinfo
+│   ├── news_scraper.py       # 新聞抓取（關鍵字路徑：Cnyes 搜尋 + Google News RSS）
+│   ├── event_sources.py      # 官方來源 adapter（MOPS 法說會）
 │   ├── earnings_validation.py # 法說會固定 gold sample 與 regression summary helper
-│   ├── stock_data.py     # 台股股價資料（yfinance）
-│   ├── event_study.py    # AR / CAR 計算（OLS 市場模型）
-│   ├── chart.py          # CAR 走勢圖產生（matplotlib）
-│   └── report.py         # 報告組裝與儲存
+│   ├── stock_data.py         # 台股股價資料（yfinance）
+│   ├── event_study.py        # AR / CAR 計算（OLS 市場模型）
+│   ├── chart.py              # CAR 走勢圖產生（matplotlib）
+│   └── report.py             # 報告組裝與儲存
 ├── prompts/
 │   ├── system.md         # Agent 系統提示
 │   └── report_format.md  # 報告格式模板
