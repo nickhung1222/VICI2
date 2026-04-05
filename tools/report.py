@@ -178,6 +178,7 @@ def _build_event_summary_section(event_collection: dict[str, Any], heat_analysis
     query = event_collection.get("query", {}) if isinstance(event_collection, dict) else {}
     stock = query.get("stock", {}) if isinstance(query, dict) else {}
     collection_plan = event_collection.get("collection_plan", {}) if isinstance(event_collection, dict) else {}
+    transcript_artifact = _select_primary_transcript_artifact(event_collection)
 
     return {
         "stock_code": stock.get("code", ""),
@@ -196,6 +197,11 @@ def _build_event_summary_section(event_collection: dict[str, Any], heat_analysis
         "primary_source": collection_plan.get("primary_source", ""),
         "heat_mode": heat_analysis.get("comparison_mode", ""),
         "official_artifact_count": len(event_collection.get("official_artifacts", [])),
+        "transcript_available": bool(transcript_artifact),
+        "transcript_source_name": transcript_artifact.get("source_name", "") if transcript_artifact else "",
+        "transcript_url": transcript_artifact.get("url", "") if transcript_artifact else "",
+        "transcript_retrieval_status": transcript_artifact.get("retrieval_status", "") if transcript_artifact else "",
+        "transcript_excerpt": transcript_artifact.get("excerpt", "") if transcript_artifact else "",
         "todo_count": len(event_collection.get("todo_items", [])),
         "pre_event_record_count": _count_records_by_phase(event_collection, {"pre_event"}),
         "post_event_record_count": _count_records_by_phase(event_collection, {"event_day", "post_event"}),
@@ -219,6 +225,26 @@ def _build_official_sources_section(event_collection: dict[str, Any]) -> dict[st
     return {
         "rows": [artifact for artifact in artifacts if isinstance(artifact, dict)],
     }
+
+
+def _select_primary_transcript_artifact(event_collection: dict[str, Any]) -> dict[str, Any]:
+    artifacts = event_collection.get("official_artifacts", []) if isinstance(event_collection, dict) else []
+    transcript_candidates = [
+        artifact
+        for artifact in artifacts
+        if isinstance(artifact, dict) and artifact.get("artifact_type") == "transcript"
+    ]
+    if not transcript_candidates:
+        return {}
+
+    transcript_candidates.sort(
+        key=lambda artifact: (
+            0 if artifact.get("retrieval_status") == "ok" else 1,
+            0 if artifact.get("excerpt") else 1,
+            str(artifact.get("source_name", "")),
+        )
+    )
+    return transcript_candidates[0]
 
 
 def _build_earnings_highlights_section(event_collection: dict[str, Any]) -> dict[str, Any]:
@@ -420,6 +446,13 @@ def _render_event_summary_section(section: dict[str, Any]) -> list[str]:
     lines.append(f"- **事件前敘事筆數**：{_format_value(section.get('pre_event_record_count'))}")
     lines.append(f"- **事件後敘事筆數**：{_format_value(section.get('post_event_record_count'))}")
     lines.append(f"- **官方來源數**：{_format_value(section.get('official_artifact_count'))}")
+    lines.append(f"- **逐字稿**：{'有' if section.get('transcript_available') else '無'}")
+    if section.get("transcript_available"):
+        lines.append(f"- **逐字稿來源**：{_format_value(section.get('transcript_source_name'))}")
+        lines.append(f"- **逐字稿狀態**：{_format_value(section.get('transcript_retrieval_status'))}")
+        lines.append(f"- **逐字稿連結**：{_format_value(section.get('transcript_url'))}")
+        if section.get("transcript_excerpt"):
+            lines.append(f"- **逐字稿摘錄**：{_format_value(section.get('transcript_excerpt'))}")
     lines.append(f"- **待辦數**：{_format_value(section.get('todo_count'))}")
     lines.append(f"- **比較模式**：{_format_value(section.get('comparison_strategy', {}).get('comparison_mode'))}")
     lines.append(f"- **資料來源**：{_format_value(section.get('sources'))}")

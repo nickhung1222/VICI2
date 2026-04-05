@@ -283,9 +283,13 @@ def test_build_event_report_payload_assembles_sections():
     assert payload["report_type"] == "event_report"
     assert payload["metadata"]["stock_code"] == "2330"
     assert payload["sections"]["event_summary"]["record_count"] == 2
+    assert payload["sections"]["event_summary"]["transcript_available"] is True
+    assert payload["sections"]["event_summary"]["transcript_url"] == "https://investor.example.com/transcript.pdf"
     assert payload["sections"]["heat_analysis"]["news_heat_label"] == "高"
     assert len(payload["sections"]["heat_analysis"]["panels"]) == 3
     assert "## 一、事件摘要" in payload["markdown"]
+    assert "逐字稿" in payload["markdown"]
+    assert "https://investor.example.com/transcript.pdf" in payload["markdown"]
     assert "## 二、市場事件前敘事" in payload["markdown"]
     assert "## 三、市場事件後敘事" in payload["markdown"]
     assert "## 四、前後敘事轉折" in payload["markdown"]
@@ -379,6 +383,31 @@ def test_build_event_report_payload_adds_data_coverage_note_for_older_events():
     markdown = payload["markdown"]
     assert "2024-10 起" in markdown
     assert "早於 2024-10-01" in markdown
+
+
+def test_build_event_report_payload_marks_missing_transcript_in_summary():
+    event_collection = _make_event_collection()
+    event_collection["official_artifacts"] = [
+        {
+            "artifact_type": "presentation",
+            "source_name": "TSMC IR",
+            "url": "https://investor.example.com/presentation.pdf",
+            "retrieval_status": "ok",
+        }
+    ]
+
+    payload = build_event_report_payload(
+        event_collection=event_collection,
+        heat_analysis=_make_heat_analysis(),
+        post_event_analysis=_make_post_event_analysis(),
+        generated_at="2026-04-02 09:30:00",
+    )
+
+    summary = payload["sections"]["event_summary"]
+    markdown = payload["markdown"]
+
+    assert summary["transcript_available"] is False
+    assert "- **逐字稿**：無" in markdown
 
 
 def test_build_event_report_payload_summarizes_narrative_shift():
