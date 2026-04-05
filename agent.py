@@ -1,8 +1,8 @@
-"""LLM Orchestrator: Gemini tool-use loop for LLM-driven modes.
+"""LLM Orchestrator: Gemini tool-use loop for experimental LLM-driven modes.
 
-Handles event_study and news_scan modes, which rely on the LLM to decide
-tool call order. Deterministic pipeline modes (event_collect, heat_scan,
-event_report) live in pipeline.py.
+Handles event_study and news_scan modes. These are retained as experimental
+or optional paths, while the deterministic primary workflow
+(event_collect, heat_scan, event_report) lives in pipeline.py.
 
 Provider: Google Gemini (configured via GEMINI_API_KEY in .env).
 """
@@ -31,7 +31,7 @@ TOOLS = [
     {
         "name": "scrape_news",
         "description": (
-            "搜尋台灣財經新聞。從鉅亨網（cnyes）和 MoneyDJ 抓取與關鍵字相關的新聞列表。"
+            "搜尋台灣財經新聞。優先從鉅亨網與結構化 archive 路徑取得相關新聞列表。"
             "回傳每篇文章的標題、日期、來源、URL、摘要，以及 cnyes news_id（可用於取得完整內容）。"
         ),
         "input_schema": {
@@ -528,5 +528,4 @@ def news_scan(query: str, days: int = 30) -> str:
     print()
 
     return _run_news_scan_gemini(query, days, system_prompt)
-
 

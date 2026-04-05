@@ -8,11 +8,13 @@ DEFAULT_GOLD_SAMPLES: list[dict[str, Any]] = [
     {"stock_code": "2330", "stock_name": "台積電", "sector": "semiconductor", "transcript_expected": True},
     {"stock_code": "2454", "stock_name": "聯發科", "sector": "ic_design", "transcript_expected": True},
     {"stock_code": "2303", "stock_name": "聯電", "sector": "semiconductor", "transcript_expected": True},
+    {"stock_code": "2317", "stock_name": "鴻海", "sector": "electronics_manufacturing", "transcript_expected": True},
     {"stock_code": "3711", "stock_name": "日月光投控", "sector": "semiconductor_packaging", "transcript_expected": False},
-    {"stock_code": "2881", "stock_name": "富邦金", "sector": "financial", "transcript_expected": False},
-    {"stock_code": "2891", "stock_name": "中信金", "sector": "financial", "transcript_expected": False},
-    {"stock_code": "1101", "stock_name": "台泥", "sector": "industrial", "transcript_expected": False},
-    {"stock_code": "6505", "stock_name": "台塑化", "sector": "petrochemical", "transcript_expected": False},
+    {"stock_code": "2382", "stock_name": "廣達", "sector": "electronics_manufacturing", "transcript_expected": False},
+    {"stock_code": "2308", "stock_name": "台達電", "sector": "industrial_electronics", "transcript_expected": True},
+    {"stock_code": "2412", "stock_name": "中華電", "sector": "telecom", "transcript_expected": False},
+    {"stock_code": "2379", "stock_name": "瑞昱", "sector": "ic_design", "transcript_expected": False},
+    {"stock_code": "3231", "stock_name": "緯創", "sector": "electronics_manufacturing", "transcript_expected": False},
 ]
 
 

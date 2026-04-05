@@ -1,4 +1,4 @@
-"""CLI entry point for VICI2 Taiwan News Event Study Agent.
+"""CLI entry point for VICI2 Taiwan Earnings Call Narrative & Heat Analysis Engine.
 
 Usage:
     # Event collect mode
@@ -11,16 +11,16 @@ Usage:
         --event-type 法說會 --event-date 2025-04-17 --event-key 2025Q1 \
         --stock-name 台積電
 
-    # Event report mode
+    # Event report mode (primary narrative-first workflow)
     python main.py --mode event_report --stock 2330.TW \
         --event-type 法說會 --start-date 2025-04-01 --end-date 2025-04-18 \
         --event-date 2025-04-17 --event-key 2025Q1 --stock-name 台積電
 
-    # Event Study mode
+    # Event Study mode (optional secondary validation)
     python main.py --mode event_study --stock 2330.TW \\
         --event-dates 2025-01-16,2025-04-17 --topic "TSMC法說會"
 
-    # News Scan mode
+    # News Scan mode (experimental / legacy)
     python main.py --mode news_scan --query "央行升息" --days 30
 """
 
@@ -34,7 +34,7 @@ load_dotenv()
 
 def main():
     parser = argparse.ArgumentParser(
-        description="VICI2: Taiwan News + Event Study Agent",
+        description="VICI2: Taiwan Earnings Call Narrative & Heat Analysis Engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -51,20 +51,26 @@ def main():
     parser.add_argument("--event-date", help="Specific event date YYYY-MM-DD (optional for event_collect)")
     parser.add_argument("--event-key", help="Recurring event key, e.g. '2025Q4' for 法說會")
     parser.add_argument("--comparison-event-date", help="Explicit prior comparable event date YYYY-MM-DD for heat_scan")
+    parser.add_argument(
+        "--phase",
+        choices=["pre_event", "post_event", "both"],
+        default="both",
+        help="Heat scan phase selector: pre_event, post_event, or both (default: both)",
+    )
     parser.add_argument("--stock-name", default="", help="Chinese stock name for query expansion")
     parser.add_argument("--max-results", type=int, default=12, help="Maximum collected records for event_collect")
     parser.add_argument(
         "--include-event-study",
         action="store_true",
-        help="Include deterministic event study output in event_report",
+        help="Include optional deterministic event study validation in event_report",
     )
     # event_study args
-    parser.add_argument("--stock", help="Yahoo Finance symbol, e.g. '2330.TW' (required for event_study)")
+    parser.add_argument("--stock", help="Yahoo Finance symbol, e.g. '2330.TW' (required for formal modes)")
     parser.add_argument("--event-dates", help="Comma-separated event dates YYYY-MM-DD (required for event_study)")
-    parser.add_argument("--topic", default="台灣財經事件", help="Event description (used in report filename)")
+    parser.add_argument("--topic", default="台灣法說會事件", help="Report topic (used in report filename)")
     # news_scan args
-    parser.add_argument("--query", help="News search keywords (required for news_scan)")
-    parser.add_argument("--days", type=int, default=30, help="Look-back days for news_scan (default: 30)")
+    parser.add_argument("--query", help="News search keywords (required for experimental news_scan)")
+    parser.add_argument("--days", type=int, default=30, help="Look-back days for experimental news_scan (default: 30)")
 
     args = parser.parse_args()
 
@@ -109,6 +115,7 @@ def main():
             event_key=args.event_key or "",
             comparison_event_date=args.comparison_event_date or "",
             max_results=args.max_results,
+            phase=args.phase,
         )
         print(f"\n✓ Heat analysis saved: {output_path}")
 

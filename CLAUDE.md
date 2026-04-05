@@ -1,4 +1,4 @@
-> 📅 **最後更新**：2026-04-04　｜　由 Claude 根據專案掃描自動整理，如需更新請直接告知。
+> 📅 **最後更新**：2026-04-05　｜　由 Claude 根據專案掃描自動整理，如需更新請直接告知。
 
 ---
 
@@ -39,19 +39,24 @@ Preferred commit message style: concise English messages such as `feat: add even
 
 ---
 
-# VICI2 — Taiwan News Event Study Agent
+# VICI2 — Taiwan Earnings Call Narrative & Heat Analysis Engine
 
 ## 專案概述
 
-VICI2 是一個台灣財經新聞事件研究 Agent，以 LLM 作為 Orchestrator，自動執行：
+VICI2 目前主打法說會事件研究的確定性 workflow，自動執行：
 - 結構化事件蒐集（event-first collector，第一階段重構）
-- 法說會官方來源蒐集（MOPS + IR artifacts）
-- 法說會 verified digest（`official_artifacts` / `earnings_digest` / `todo_items`）
-- 新聞抓取（法說會使用 Goodinfo 個股日期索引；其他事件使用 Cnyes symbol news API，兩者皆以 normalized record schema 輸出；關鍵字 fallback 走 Cnyes 搜尋 + Google News RSS）
+- 市場前後敘事整理（依 `pre_event` / `event_day` / `post_event` 記錄組裝）
+- 法說後敘事收斂（post-event 新聞先寬抓，再用 deterministic relevance filter 優先保留高信心法說後解讀）
+- 事件前後熱度分析（`heat_scan --phase pre_event|post_event|both`；事件前輸出 multi-panel heat comparison，事件後輸出 coverage comparison）
+- 單一正式 Markdown 報告（目前只呈現事件摘要、事件前敘事、事件後敘事、敘事轉折、熱度分析）
+- 目前新聞資料來源實際可用區間主要自 2024-10 起；更早日期的法說會常見結果是空報告或資料不足
+- 新聞抓取（法說會日期有 `event_key` 時由 `EMOPS historical -> Yahoo 股市行事曆 -> MOPS latest` resolver 決定；historical resolver 目前只對台灣市值前 10 大公司且 `2024Q3` 之後的季度啟用。Yahoo 只有在 `相關訊息` 可對上季度別名時才採用，無 `event_key` 時再退回 MOPS latest resolver；Goodinfo 僅作為法說會新聞補充來源；其他事件使用 Cnyes symbol news API，皆以 normalized record schema 輸出；關鍵字 fallback 走 Cnyes 搜尋 + Google News RSS）
 - 獨立 Cnyes 個股新聞區間查詢（`tools/cnyes_stock_news.py`，也作為主流程主要來源整合）
-- 中文情緒分析（看多 / 看空 / 中性）
-- 事件研究計算（AR / CAR，市場模型 OLS）
-- 圖表產生與 Markdown 報告輸出
+- 事件研究計算（AR / CAR，市場模型 OLS，保留為獨立 optional mode）
+
+補充：
+- `official_artifacts` / `earnings_digest` / `todo_items` 仍可能存在於結構化輸出，但目前不列入正式報告正文
+- 法說會官方來源補強與 verified digest 仍屬 best-effort，現階段視為補強資料而非主報告承諾
 
 LLM Provider：**Google Gemini**（`gemini-2.0-flash`），透過 `google-genai` SDK 呼叫。
 
@@ -61,7 +66,7 @@ LLM Provider：**Google Gemini**（`gemini-2.0-flash`），透過 `google-genai`
 
 ```
 VICI2/
-├── agent.py          # Gemini LLM tool-use loop（僅 event_study / news_scan 模式）
+├── agent.py          # experimental / optional Gemini tool-use loop（僅 event_study / news_scan 模式）
 ├── pipeline.py       # 確定性 pipeline（event_collect / heat_scan / event_report）
 ├── main.py           # CLI 入口
 ├── tools/            # 各功能模組
@@ -115,15 +120,16 @@ python main.py --mode event_collect \
     --end-date 2025-04-17 \
     --event-date 2025-04-17
 
-# Heat Scan 模式（事件前熱度分析）
+# Heat Scan 模式（事件前後熱度分析）
 python main.py --mode heat_scan \
     --stock 2330.TW \
     --stock-name 台積電 \
     --event-type 法說會 \
     --event-date 2025-04-17 \
-    --event-key 2025Q1
+    --event-key 2025Q1 \
+    --phase both
 
-# Event Report 模式（整合報告）
+# Event Report 模式（主流程：前後敘事 + 敘事轉折 + 熱度）
 python main.py --mode event_report \
     --stock 2330.TW \
     --stock-name 台積電 \
@@ -133,13 +139,13 @@ python main.py --mode event_report \
     --event-date 2025-04-17 \
     --event-key 2025Q1
 
-# Event Study 模式（LLM 驅動：新聞 → 情緒 → AR/CAR → 圖表 → 報告）
+# Event Study 模式（optional secondary validation）
 python main.py --mode event_study \
     --stock 2330.TW \
     --event-dates 2025-01-16,2025-04-17 \
     --topic "TSMC法說會"
 
-# News Scan 模式（LLM 驅動：query-first 掃描）
+# News Scan 模式（experimental / legacy）
 python main.py --mode news_scan --query "央行升息" --days 30
 
 # Standalone Cnyes Stock News（獨立模組）
@@ -171,8 +177,8 @@ GEMINI_MODEL=gemini-2.0-flash
 
 | 檔案 | 模式 | 特性 |
 |------|------|------|
-| `agent.py` | `event_study`、`news_scan` | LLM 驅動，Gemini 決定工具呼叫順序 |
-| `pipeline.py` | `event_collect`、`heat_scan`、`event_report` | 確定性，直接呼叫工具，輸出可重現 |
+| `agent.py` | `event_study`、`news_scan` | experimental / optional 路徑，由 Gemini 決定工具呼叫順序 |
+| `pipeline.py` | `event_collect`、`heat_scan`、`event_report` | 正式主流程，確定性，直接呼叫工具，輸出可重現 |
 
 `main.py` 分別從兩個模組 import，路由到對應的執行路徑。
 
@@ -180,7 +186,7 @@ GEMINI_MODEL=gemini-2.0-flash
 
 - **有 stock_code**（主流程）：`tools/news_archive.py` 整合兩個主要來源：
   - **Cnyes symbol news API**（`cnyes_stock_news.py`）：近期約 2 個月，精準個股新聞
-  - **Goodinfo**：長期歷史，法說會事件優先使用
+  - **Goodinfo**：長期歷史，作為法說會新聞補充來源
   - 兩者輸出統一的 normalized record schema（`headline` / `published_at` / `source_article_id`）
 - **關鍵字查詢**（無 stock_code）：`news_scraper.py` fallback 路徑，使用：
   - Cnyes 搜尋 API
@@ -189,11 +195,36 @@ GEMINI_MODEL=gemini-2.0-flash
 ### Event Collect 模式（第一階段重構）
 1. `event_collect()` 在 `pipeline.py` 呼叫 `tools/event_collector.py`
 2. 將股票、事件類型、日期範圍正規化為 collection plan
-3. 對 `法說會` 先走 `tools/event_sources.py` 收集 MOPS record、IR artifacts、verified digest 與 todo
+3. 對 `法說會` 可 best-effort 走 `tools/event_sources.py` 收集 MOPS record、IR artifacts、verified digest 與 todo
 4. 再透過 `tools/news_archive.py` 收集 normalized event/news records
 5. 使用 `save_event_record()` 輸出 JSON 到 `outputs/events/`
+6. 若提供 `event_key`，先確認是否在目前支援範圍內（台灣市值前 10 大公司，且 `2024Q3` 之後）；範圍內先查 EMOPS historical 歷史公告，再 fallback Yahoo 股市行事曆；只有在可確認同一季度時才覆寫日期，否則保留原日期並標記 unverified
 
-### Event Study 模式（7 步驟，LLM 驅動）
+### Event Report 模式（正式主輸出）
+1. `event_collect()` 收集事件導向 records
+2. 依 `event_phase` 組出事件前與事件後敘事
+3. 組出前後敘事轉折摘要
+4. `heat_scan()` 補事件前後熱度分析
+5. 輸出正式 Markdown 報告與 JSON
+
+目前正式 Markdown 報告只包含：
+- 一、事件摘要
+- 二、市場事件前敘事
+- 三、市場事件後敘事
+- 四、前後敘事轉折
+- 五、熱度分析
+
+事件摘要需明確標示：
+- 目前新聞資料來源實際可用區間主要自 2024-10 起
+- 若事件日期早於 2024-10-01，需提醒使用者該報告可能只有空結果或資料不足
+
+不列入正式報告正文的項目：
+- 官方來源清單
+- verified digest / 財務重點 / 管理層態度 / Q&A
+- 事件研究驗證
+- 資料缺口與待辦事項
+
+### Event Study 模式（optional secondary validation）
 1. `scrape_news` — 搜尋事件主題相關新聞
 2. `fetch_article_content` — 取得前 5 篇完整文章
 3. 情緒分析（LLM 直接推論，無額外工具）
@@ -227,12 +258,16 @@ GEMINI_MODEL=gemini-2.0-flash
 ### `tools/event_collector.py`
 - `collect_event_records(...)` — 以事件導向輸入建立結構化事件紀錄
 - `build_collection_queries(...)` — 將股票標的與事件類型轉成 event-first query plan
-- 對 `法說會` 額外輸出 `official_artifacts`、`earnings_digest`、`todo_items`
+- 對 `法說會` 可 best-effort 額外輸出 `official_artifacts`、`earnings_digest`、`todo_items`
 
 ### `tools/event_sources.py`
 - `fetch_mops_investor_conference(...)` — 取得法說會官方日期、摘要與官方頁連結
+- `fetch_historical_earnings_event_date(...)` — 由 EMOPS historical information 歷史公告清單解析指定季度的法說日期
+- `fetch_yahoo_calendar_event_date(...)` — 由 Yahoo 股市行事曆解析帶季度訊息的歷史法說日期
+- `resolve_earnings_event_date(...)` — 以 `EMOPS historical -> Yahoo 股市行事曆 -> MOPS latest` 的 official-first 規則驗證、補齊或覆寫法說會日期
 - `collect_official_event_records(...)` — 組裝 MOPS record + IR artifacts + verified digest + todo
 - 只保留帶 `evidence/source_ref` 的 verified metrics、management tone、Q&A
+- 目前主要作為補強資料層，不是正式報告正文的固定輸出承諾
 
 ### `tools/schemas.py`
 - `normalize_symbol(...)` — 將股票代碼正規化為 Yahoo Finance 樣式
@@ -255,7 +290,8 @@ GEMINI_MODEL=gemini-2.0-flash
 ### `tools/report.py`
 - `save_report(content, topic)` — 儲存 Markdown 到 `outputs/reports/`
 - `save_event_record(...)` — 儲存單次事件記錄
-- `build_event_report_payload(...)` — 組裝 JSON 格式的完整事件報告
+- `build_event_report_payload(...)` — 組裝 JSON payload 與正式 Markdown 報告
+- 正式 Markdown 報告目前只保留 5 個段落，其他法說會補強欄位先不顯示
 
 ---
 
@@ -307,7 +343,7 @@ pytest tests/
 修改 `.env` 中的 `GEMINI_MODEL`，例如改為 `gemini-1.5-pro`。
 
 **Q：`event_collect` 和 `news_scan` 差在哪裡？**
-`event_collect` 是 event-first，輸出結構化 JSON，由 `pipeline.py` 確定性執行，適合作為後續分析上游資料；`news_scan` 是 LLM 驅動的 query-first 掃描，適合快速臨時查詢。
+`event_collect` 是正式主流程的一部分，event-first、輸出結構化 JSON，由 `pipeline.py` 確定性執行；`news_scan` 是 experimental / legacy 的 query-first 掃描，適合快速臨時查詢。
 
 **Q：cnyes_stock_news 只能查近 2 個月嗎？**
 cnyes symbol news API 覆蓋近期約 2 個月。超過範圍時，`news_archive.py` 會自動以 Goodinfo 補充；也可以直接用 `python -m tools.cnyes_stock_news` 獨立查詢。
@@ -316,4 +352,4 @@ cnyes symbol news API 覆蓋近期約 2 個月。超過範圍時，`news_archive
 使用 `python -m tools.cnyes_stock_news --stock <code> --date-from YYYY-MM-DD --date-to YYYY-MM-DD`。這個入口也被 `news_archive.py` 整合進主流程，作為 stock_code 路徑的主要來源之一。
 
 **Q：`agent.py` 和 `pipeline.py` 差在哪裡？**
-`agent.py` 只處理 LLM tool-use 模式（`event_study`、`news_scan`），由 Gemini 決定工具呼叫順序。`pipeline.py` 處理確定性 pipeline 模式（`event_collect`、`heat_scan`、`event_report`），每一步都是固定的，不依賴 LLM。
+`agent.py` 只處理 experimental / optional 的 LLM tool-use 模式（`event_study`、`news_scan`）。`pipeline.py` 處理正式主流程（`event_collect`、`heat_scan`、`event_report`），每一步都是固定的，不依賴 LLM。

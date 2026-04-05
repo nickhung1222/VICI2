@@ -12,7 +12,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
-from tools.event_sources import collect_official_event_records
+from tools.event_sources import collect_official_event_records, resolve_earnings_event_date
 from tools.news_scraper import fetch_article_content, search_news
 from tools.schemas import (
     build_comparison_strategy,
@@ -25,6 +25,54 @@ from tools.schemas import (
 
 _PREVIEW_KEYWORDS = ("預期", "展望", "前瞻", "市場看", "估", "法說前", "財測", "指引")
 _ANALYST_KEYWORDS = ("分析師", "法人", "外資", "目標價", "評等")
+_EARNINGS_POST_CORE_KEYWORDS = (
+    "法說會",
+    "法說",
+    "財測",
+    "展望",
+    "指引",
+    "毛利率",
+    "營收",
+    "eps",
+    "每股盈餘",
+    "資本支出",
+    "capex",
+    "q1",
+    "q2",
+    "q3",
+    "q4",
+)
+_EARNINGS_POST_REACTION_KEYWORDS = (
+    "法人",
+    "外資",
+    "分析師",
+    "目標價",
+    "評等",
+    "管理層",
+    "釋疑",
+    "法說後",
+    "會後",
+)
+_EARNINGS_POST_NOISE_KEYWORDS = (
+    "慈善",
+    "基金會",
+    "熊本",
+    "菊陽町",
+    "台股開盤",
+    "台股盤後",
+    "三大法人賣超",
+    "大盤",
+    "市值蒸發",
+    "華為",
+    "出口紅線",
+    "合作協議",
+)
+_EARNINGS_POST_NEGATION_PHRASES = (
+    "無直接關聯",
+    "與法說內容無直接關聯",
+    "與法說無關",
+    "與法說會無關",
+)
 
 
 def collect_event_records(
@@ -53,6 +101,15 @@ def collect_event_records(
         event_type=event_type,
         pre_event_report_days=pre_event_report_days,
     )
+    event_date_resolution = _resolve_event_date(
+        target=target,
+        event_type=event_type,
+        start_date=effective_start_date,
+        end_date=effective_end_date,
+        event_date=event_date,
+        event_key=comparison_strategy["event_key"],
+    )
+    effective_event_date = event_date_resolution["resolved_event_date"]
     official_payload = collect_official_event_records(
         stock_code=target["code"],
         stock_name=target["name"],
@@ -60,14 +117,20 @@ def collect_event_records(
         event_type=event_type,
         start_date=effective_start_date,
         end_date=effective_end_date,
-        event_date=event_date,
+        event_date=effective_event_date,
         event_key=comparison_strategy["event_key"],
+        prefetched_record=event_date_resolution.get("official_record"),
+        disable_latest_fetch=(
+            event_type == "法說會"
+            and event_date_resolution.get("source") == "emops_history"
+            and not event_date_resolution.get("official_record")
+        ),
     )
     queries = build_collection_queries(
         target=target,
         event_type=event_type,
         event_key=comparison_strategy["event_key"],
-        event_date=event_date,
+        event_date=effective_event_date,
     )
 
     if not queries:
@@ -75,17 +138,14 @@ def collect_event_records(
 
     per_query = max(4, math.ceil(max_results / len(queries)) + 1)
     ranked_articles: list[dict[str, Any]] = []
-    archive_count = 0
-    secondary_count = 0
-    live_fetched_count = 0
     archive_data_gaps: list[str] = []
 
-    for query in queries:
+    if target["code"]:
         search_payload = search_news(
-            query=query,
+            query=queries[0],
             date_from=effective_start_date,
             date_to=effective_end_date,
-            max_results=per_query,
+            max_results=max_results,
             stock_code=target["code"],
             stock_name=target["name"],
             event_type=event_type,
@@ -101,26 +161,54 @@ def collect_event_records(
                 archive_data_gaps.append(gap)
         for article in articles:
             article_copy = dict(article)
-            article_copy["matched_query"] = query
+            article_copy["matched_query"] = _find_best_matching_query(
+                article=article_copy,
+                queries=queries,
+            )
             article_copy["_score"] = _score_article(
                 article=article_copy,
                 target=target,
                 event_type=event_type,
-                event_date=event_date,
+                event_date=effective_event_date,
             )
             ranked_articles.append(article_copy)
-            if article_copy.get("is_primary_source"):
-                archive_count += 1
-            elif article_copy.get("retrieval_method") in {"google_news_rss", "goodinfo_http_index", "goodinfo_browser_index", "yfinance_get_news"}:
-                secondary_count += 1
-            else:
-                live_fetched_count += 1
-        if len(dedupe_records(ranked_articles, ["url", "headline", "published_at"])) >= max_results:
-            break
+    else:
+        for query in queries:
+            search_payload = search_news(
+                query=query,
+                date_from=effective_start_date,
+                date_to=effective_end_date,
+                max_results=per_query,
+                stock_code=target["code"],
+                stock_name=target["name"],
+                event_type=event_type,
+                queries=queries,
+                source_policy="archive_first",
+                primary_source=primary_source,
+                allow_secondary_sources=allow_secondary_sources,
+                return_metadata=True,
+            )
+            articles = search_payload.get("articles", []) if isinstance(search_payload, dict) else search_payload
+            for gap in (search_payload.get("data_gaps", []) if isinstance(search_payload, dict) else []):
+                if gap not in archive_data_gaps:
+                    archive_data_gaps.append(gap)
+            for article in articles:
+                article_copy = dict(article)
+                article_copy["matched_query"] = query
+                article_copy["_score"] = _score_article(
+                    article=article_copy,
+                    target=target,
+                    event_type=event_type,
+                    event_date=effective_event_date,
+                )
+                ranked_articles.append(article_copy)
+            if len(dedupe_records(ranked_articles, ["url", "headline", "published_at"])) >= max_results:
+                break
 
     ranked_articles.sort(key=lambda item: (-item["_score"], item.get("published_at", ""), item.get("headline", "")))
     ranked_articles = dedupe_records(ranked_articles, ["url", "headline", "published_at"])
     selected_articles = ranked_articles[:max_results]
+    record_breakdown = _build_record_breakdown(selected_articles)
 
     records: list[dict[str, Any]] = list(official_payload["records"])
     for index, article in enumerate(selected_articles):
@@ -133,14 +221,23 @@ def collect_event_records(
                 news_id=article.get("source_article_id", ""),
             )
 
+        article_date = article.get("published_at", "")
+        event_phase = classify_event_phase(article_date=article_date, event_date=effective_event_date)
         summary_source = content or article.get("snippet", "")
         article_type = _classify_article_type(
             event_type=event_type,
+            event_phase=event_phase,
             title=article.get("headline", ""),
             snippet=article.get("snippet", ""),
         )
-        article_date = article.get("published_at", "")
-        event_phase = classify_event_phase(article_date=article_date, event_date=event_date)
+        post_event_relevance = _score_post_event_earnings_relevance(
+            event_type=event_type,
+            event_phase=event_phase,
+            title=article.get("headline", ""),
+            snippet=article.get("snippet", ""),
+            article_date=article_date,
+            event_date=effective_event_date,
+        )
         record_flags = infer_record_flags(
             event_phase=event_phase,
             article_type=article_type,
@@ -152,7 +249,7 @@ def collect_event_records(
                 "stock_name": target["name"],
                 "symbol": target["symbol"],
                 "event_type": event_type,
-                "event_date": event_date,
+                "event_date": effective_event_date,
                 "event_key": comparison_strategy["event_key"],
                 "event_phase": event_phase,
                 "article_date": article_date,
@@ -169,13 +266,21 @@ def collect_event_records(
                 "retrieval_method": article.get("retrieval_method", ""),
                 "is_primary_source": article.get("is_primary_source", False),
                 "dedupe_key": article.get("dedupe_key", ""),
+                "post_event_relevance_score": post_event_relevance["score"],
+                "post_event_relevance_reasons": post_event_relevance["reasons"],
+                "is_post_event_earnings_related": post_event_relevance["is_related"],
                 **record_flags,
             }
         )
 
     records = dedupe_records(records, ["stock_code", "event_date", "article_date", "headline", "source_url"])
     records.sort(key=lambda item: (item.get("article_date", ""), item.get("headline", "")))
-    final_data_gaps = _merge_data_gaps(comparison_strategy["data_gaps"], official_payload["data_gaps"], archive_data_gaps)
+    final_data_gaps = _merge_data_gaps(
+        comparison_strategy["data_gaps"],
+        list(event_date_resolution.get("data_gaps", [])),
+        official_payload["data_gaps"],
+        archive_data_gaps,
+    )
     if not records and primary_source == "goodinfo" and not allow_secondary_sources and "no_news_in_interval" not in final_data_gaps:
         final_data_gaps.append("no_news_in_interval")
     todo_items = _merge_todo_items(
@@ -199,7 +304,15 @@ def collect_event_records(
                 "effective_end": effective_end_date,
             },
             "stock": target,
-            "event_date": event_date,
+            "event_date": effective_event_date,
+            "requested_event_date": event_date,
+            "event_date_resolution": {
+                "status": event_date_resolution.get("status", ""),
+                "source": event_date_resolution.get("source", ""),
+                "reason": event_date_resolution.get("reason", ""),
+                "official_event_date": event_date_resolution.get("official_event_date", ""),
+                "official_event_key": event_date_resolution.get("official_event_key", ""),
+            },
             "event_key": comparison_strategy["event_key"],
             "max_results": max_results,
         },
@@ -224,11 +337,7 @@ def collect_event_records(
         },
         "data_gaps": final_data_gaps,
         "record_count": len(records),
-        "record_breakdown": {
-            "archive_records": archive_count,
-            "secondary_source_records": secondary_count,
-            "live_fetched_records": live_fetched_count,
-        },
+        "record_breakdown": record_breakdown,
         "official_artifacts": list(official_payload.get("official_artifacts", [])),
         "earnings_digest": dict(official_payload.get("earnings_digest", {})),
         "todo_items": todo_items,
@@ -242,6 +351,60 @@ def _build_source_list(official_records: list[dict[str, Any]]) -> list[str]:
     if official_records:
         sources.insert(0, "mops")
     return sources
+
+
+def _build_record_breakdown(articles: list[dict[str, Any]]) -> dict[str, int]:
+    """Build source breakdown from the final deduped article set."""
+    archive_count = 0
+    secondary_count = 0
+    live_fetched_count = 0
+    secondary_methods = {"google_news_rss", "goodinfo_http_index", "goodinfo_browser_index", "yfinance_get_news"}
+
+    for article in articles:
+        if article.get("is_primary_source"):
+            archive_count += 1
+        elif article.get("retrieval_method") in secondary_methods:
+            secondary_count += 1
+        else:
+            live_fetched_count += 1
+
+    return {
+        "archive_records": archive_count,
+        "secondary_source_records": secondary_count,
+        "live_fetched_records": live_fetched_count,
+    }
+
+
+def _resolve_event_date(
+    *,
+    target: dict[str, str],
+    event_type: str,
+    start_date: str,
+    end_date: str,
+    event_date: str,
+    event_key: str,
+) -> dict[str, Any]:
+    if event_type != "法說會" or not target.get("code"):
+        return {
+            "requested_event_date": event_date,
+            "resolved_event_date": event_date,
+            "official_event_date": "",
+            "official_event_key": "",
+            "status": "requested",
+            "source": "requested",
+            "reason": "non_earnings_event",
+            "data_gaps": [],
+            "official_record": None,
+        }
+    return resolve_earnings_event_date(
+        stock_code=target["code"],
+        stock_name=target["name"],
+        symbol=target["symbol"],
+        start_date=start_date,
+        end_date=end_date,
+        event_date=event_date,
+        event_key=event_key,
+    )
 
 
 def _derive_effective_collection_window(
@@ -346,11 +509,17 @@ def build_collection_queries(
     return queries
 
 
-def _classify_article_type(event_type: str, title: str, snippet: str) -> str:
+def _classify_article_type(event_type: str, event_phase: str, title: str, snippet: str) -> str:
     """Infer a downstream-friendly article type from title and snippet."""
     text = f"{title} {snippet}"
+    lowered = text.lower()
 
     if event_type == "法說會":
+        if event_phase in {"event_day", "post_event"}:
+            if "法說" in text and any(keyword in lowered for keyword in ("毛利率", "營收", "eps", "capex", "財測", "指引", "展望", "資本支出")):
+                return "法說後解讀"
+            if any(keyword in text for keyword in _ANALYST_KEYWORDS):
+                return "法人解讀"
         if any(keyword in title for keyword in _ANALYST_KEYWORDS):
             return "分析師觀點"
         if any(keyword in text for keyword in _PREVIEW_KEYWORDS):
@@ -359,6 +528,59 @@ def _classify_article_type(event_type: str, title: str, snippet: str) -> str:
             return "分析師觀點"
 
     return "媒體報導"
+
+
+def _score_post_event_earnings_relevance(
+    *,
+    event_type: str,
+    event_phase: str,
+    title: str,
+    snippet: str,
+    article_date: str,
+    event_date: str,
+) -> dict[str, Any]:
+    """Score whether a post-event article is likely tied to earnings-call interpretation."""
+    if event_type != "法說會" or event_phase not in {"event_day", "post_event"}:
+        return {"score": 0, "reasons": [], "is_related": False}
+
+    text = f"{title} {snippet}"
+    lowered = text.lower()
+    score = 0
+    reasons: list[str] = []
+
+    if "法說會" in text or "法說" in text:
+        score += 4
+        reasons.append("mentions_earnings_call")
+    if any(keyword in lowered for keyword in _EARNINGS_POST_CORE_KEYWORDS):
+        score += 2
+        reasons.append("mentions_financial_or_guidance_terms")
+    if any(keyword in text for keyword in _EARNINGS_POST_REACTION_KEYWORDS):
+        score += 2
+        reasons.append("mentions_market_reaction_terms")
+    if any(keyword in text for keyword in _EARNINGS_POST_NOISE_KEYWORDS):
+        score -= 3
+        reasons.append("contains_noise_topic")
+    if any(phrase in text for phrase in _EARNINGS_POST_NEGATION_PHRASES):
+        score -= 4
+        reasons.append("explicitly_not_earnings_related")
+    try:
+        article_dt = datetime.strptime(article_date, "%Y-%m-%d")
+        event_dt = datetime.strptime(event_date, "%Y-%m-%d")
+        days_after = (article_dt - event_dt).days
+    except ValueError:
+        days_after = None
+    if days_after is not None and 0 <= days_after <= 2:
+        score += 1
+        reasons.append("close_to_event_day")
+
+    is_related = score >= 3 and "explicitly_not_earnings_related" not in reasons and not (
+        "contains_noise_topic" in reasons and "mentions_earnings_call" not in reasons
+    )
+    return {
+        "score": score,
+        "reasons": reasons,
+        "is_related": is_related,
+    }
 
 
 def _score_article(article: dict[str, Any], target: dict[str, str], event_type: str, event_date: str) -> float:
@@ -386,3 +608,22 @@ def _score_article(article: dict[str, Any], target: dict[str, str], event_type: 
             pass
 
     return score
+
+
+def _find_best_matching_query(article: dict[str, Any], queries: list[str]) -> str:
+    """Pick the query variant that best matches the article text."""
+    title = str(article.get("headline", "")).strip()
+    snippet = str(article.get("snippet", "")).strip()
+    text = f"{title} {snippet}"
+    best_query = queries[0] if queries else ""
+    best_score = -1
+    for query in queries:
+        score = 0
+        for token in query.split():
+            token = token.strip()
+            if token and token in text:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_query = query
+    return best_query

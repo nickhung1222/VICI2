@@ -48,18 +48,6 @@
 
 ---
 
-## 六、事件研究（可選）
-
-{event_study_bullets}
-
----
-
-## 七、資料缺口與限制
-
-{data_gaps_bullets}
-
----
-
 *報告由 VICI2 台灣新聞事件研究 Agent 自動生成*
 *生成時間：{generated_at}*
 ```

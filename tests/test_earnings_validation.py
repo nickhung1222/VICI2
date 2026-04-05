@@ -9,9 +9,9 @@ from tools.earnings_validation import DEFAULT_GOLD_SAMPLES, summarize_regression
 
 
 def test_default_gold_samples_cover_multiple_sectors_and_transcript_modes():
-    assert len(DEFAULT_GOLD_SAMPLES) == 8
+    assert len(DEFAULT_GOLD_SAMPLES) == 10
     sectors = {sample["sector"] for sample in DEFAULT_GOLD_SAMPLES}
-    assert {"semiconductor", "ic_design", "financial", "industrial"} <= sectors
+    assert {"semiconductor", "ic_design", "electronics_manufacturing", "telecom"} <= sectors
     assert any(sample["transcript_expected"] for sample in DEFAULT_GOLD_SAMPLES)
     assert any(not sample["transcript_expected"] for sample in DEFAULT_GOLD_SAMPLES)
 

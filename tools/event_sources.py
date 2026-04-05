@@ -5,18 +5,36 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
+import json
 import re
+import time
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 from tools.expectation_analysis import SUPPORTED_METRICS, extract_metric_observations
-from tools.schemas import classify_event_phase, compact_text, dedupe_strings, infer_record_flags
+from tools.schemas import classify_event_phase, compact_text, dedupe_strings, infer_record_flags, normalize_event_key
 
 _MOPS_OV_EVENT_URL = "https://mopsov.twse.com.tw/mops/web/ajax_t100sb07_1"
 _MOPS_OV_PAGE_URL = "https://mopsov.twse.com.tw/mops/web/t100sb07_1"
+_EMOPS_HISTORY_URL = "https://emops.twse.com.tw/server-java/t05st01_e"
+_YAHOO_TW_CALENDAR_URL = "https://tw.stock.yahoo.com/quote/{symbol}/calendar"
+_EMOPS_HISTORY_RETRY_DELAYS = (0.0, 1.0, 2.0, 4.0)
+_SUPPORTED_HISTORICAL_EARNINGS_CODES = {
+    "2330",  # 台積電
+    "2454",  # 聯發科
+    "2303",  # 聯電
+    "2317",  # 鴻海
+    "3711",  # 日月光投控
+    "2382",  # 廣達
+    "2308",  # 台達電
+    "2412",  # 中華電
+    "2379",  # 瑞昱
+    "3231",  # 緯創
+}
+_SUPPORTED_HISTORICAL_EARNINGS_MIN_EVENT_KEY = "2024Q3"
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
@@ -127,6 +145,306 @@ class _ArtifactValidation:
     gaps: tuple[str, ...]
 
 
+def resolve_earnings_event_date(
+    *,
+    stock_code: str,
+    stock_name: str,
+    symbol: str,
+    start_date: str = "",
+    end_date: str = "",
+    event_date: str = "",
+    event_key: str = "",
+) -> dict[str, Any]:
+    """Resolve a trustworthy earnings-call event date from official sources.
+
+    MOPS is treated as the source of truth when we can confirm the same event
+    (for example via exact date match or quarter-key match). Otherwise we keep
+    the user-requested date instead of guessing.
+    """
+    requested_event_date = (event_date or "").strip()
+    normalized_event_key = normalize_event_key("法說會", event_key) if event_key else ""
+    if normalized_event_key and _supports_historical_earnings_scope(stock_code=stock_code, event_key=normalized_event_key):
+        historical_resolution = fetch_historical_earnings_event_date(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            symbol=symbol,
+            event_key=normalized_event_key,
+        )
+        if historical_resolution.get("resolved_event_date"):
+            latest_official_record = fetch_mops_investor_conference(
+                stock_code=stock_code,
+                stock_name=stock_name,
+                symbol=symbol,
+                event_date=historical_resolution["resolved_event_date"],
+                event_key=normalized_event_key,
+            )
+            official_record = (
+                latest_official_record
+                if latest_official_record and latest_official_record.get("article_date") == historical_resolution["resolved_event_date"]
+                else None
+            )
+            result = {
+                "requested_event_date": requested_event_date,
+                "resolved_event_date": historical_resolution["resolved_event_date"],
+                "official_event_date": historical_resolution["resolved_event_date"],
+                "event_key": normalized_event_key,
+                "official_event_key": historical_resolution.get("matched_event_key", normalized_event_key),
+                "status": historical_resolution.get("status", "resolved_from_emops_history"),
+                "source": historical_resolution.get("source", "emops_history"),
+                "reason": historical_resolution.get("reason", "historical_event_key_match"),
+                "data_gaps": list(historical_resolution.get("data_gaps", [])),
+                "official_record": official_record,
+            }
+            if requested_event_date and requested_event_date != result["resolved_event_date"]:
+                result["status"] = "overridden_by_emops_history"
+                if "event_date_overridden_by_emops_history" not in result["data_gaps"]:
+                    result["data_gaps"].append("event_date_overridden_by_emops_history")
+            return result
+        yahoo_resolution = fetch_yahoo_calendar_event_date(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            symbol=symbol,
+            event_key=normalized_event_key,
+        )
+        if yahoo_resolution.get("resolved_event_date"):
+            result = {
+                "requested_event_date": requested_event_date,
+                "resolved_event_date": yahoo_resolution["resolved_event_date"],
+                "official_event_date": "",
+                "event_key": normalized_event_key,
+                "official_event_key": yahoo_resolution.get("matched_event_key", normalized_event_key),
+                "status": yahoo_resolution.get("status", "resolved_from_yahoo_calendar"),
+                "source": yahoo_resolution.get("source", "yahoo_calendar"),
+                "reason": yahoo_resolution.get("reason", "historical_event_key_match_from_yahoo_calendar"),
+                "data_gaps": list(yahoo_resolution.get("data_gaps", [])),
+                "official_record": None,
+            }
+            if requested_event_date and requested_event_date != result["resolved_event_date"]:
+                result["status"] = "overridden_by_yahoo_calendar"
+                if "event_date_overridden_by_yahoo_calendar" not in result["data_gaps"]:
+                    result["data_gaps"].append("event_date_overridden_by_yahoo_calendar")
+            return result
+
+    official_record = fetch_mops_investor_conference(
+        stock_code=stock_code,
+        stock_name=stock_name,
+        symbol=symbol,
+        event_date=requested_event_date,
+        event_key=normalized_event_key,
+    )
+
+    resolution = {
+        "requested_event_date": requested_event_date,
+        "resolved_event_date": requested_event_date,
+        "official_event_date": "",
+        "event_key": normalized_event_key,
+        "official_event_key": "",
+        "status": "requested",
+        "source": "requested",
+        "reason": "requested_event_date",
+        "data_gaps": [],
+        "official_record": official_record,
+    }
+    if not official_record:
+        resolution["status"] = "unverified"
+        resolution["source"] = "unverified"
+        resolution["reason"] = "mops_record_missing"
+        resolution["data_gaps"] = ["mops_official_record_unavailable"]
+        return resolution
+
+    official_event_date = str(official_record.get("article_date", "")).strip()
+    official_event_key = str(official_record.get("official_event_key", "")).strip()
+    resolution["official_event_date"] = official_event_date
+    resolution["official_event_key"] = official_event_key
+
+    date_matches = bool(requested_event_date and requested_event_date == official_event_date)
+    key_matches = bool(normalized_event_key and official_event_key and normalized_event_key == official_event_key)
+    official_in_range = _date_within_range(official_event_date, start_date=start_date, end_date=end_date)
+
+    if date_matches:
+        resolution["resolved_event_date"] = official_event_date
+        resolution["status"] = "validated_by_mops"
+        resolution["source"] = "mops"
+        resolution["reason"] = "official_date_matches_request"
+        return resolution
+
+    if not requested_event_date and official_event_date and (not normalized_event_key or key_matches) and official_in_range:
+        resolution["resolved_event_date"] = official_event_date
+        resolution["status"] = "resolved_from_mops"
+        resolution["source"] = "mops"
+        resolution["reason"] = "filled_missing_event_date"
+        return resolution
+
+    if requested_event_date and official_event_date and key_matches and official_in_range:
+        resolution["resolved_event_date"] = official_event_date
+        resolution["status"] = "overridden_by_mops"
+        resolution["source"] = "mops"
+        resolution["reason"] = "official_date_confirmed_for_event_key"
+        resolution["data_gaps"] = ["event_date_overridden_by_mops"]
+        return resolution
+
+    gaps: list[str] = []
+    if normalized_event_key and official_event_key and normalized_event_key != official_event_key:
+        gaps.append("mops_event_key_mismatch")
+    elif requested_event_date and official_event_date and requested_event_date != official_event_date:
+        gaps.append("mops_event_date_unverified")
+    elif not requested_event_date:
+        gaps.append("mops_event_date_unverified")
+    if official_event_date and not official_in_range and (date_matches or key_matches or not requested_event_date):
+        gaps.append("mops_record_outside_requested_range")
+
+    resolution["status"] = "unverified"
+    resolution["source"] = "requested" if requested_event_date else "unverified"
+    resolution["reason"] = "official_record_not_safe_to_apply"
+    resolution["data_gaps"] = dedupe_strings(gaps)
+    return resolution
+
+
+def fetch_historical_earnings_event_date(
+    *,
+    stock_code: str,
+    stock_name: str,
+    symbol: str,
+    event_key: str,
+) -> dict[str, Any]:
+    """Resolve a historical earnings-call date from EMOPS historical disclosures."""
+    normalized_event_key = normalize_event_key("法說會", event_key)
+    quarter_aliases = _build_quarter_aliases(normalized_event_key)
+    target_year = int(normalized_event_key[:4])
+    years_to_scan = [target_year]
+    if normalized_event_key.endswith("Q4"):
+        years_to_scan.append(target_year + 1)
+
+    candidates: list[dict[str, Any]] = []
+    for year in years_to_scan:
+        for entry in _fetch_emops_history_entries(stock_code=stock_code, year=year):
+            score = _score_emops_history_entry(entry=entry, quarter_aliases=quarter_aliases)
+            if score <= 0:
+                continue
+            detail = _fetch_emops_history_detail(entry.get("detail_url", ""))
+            if detail:
+                entry["detail"] = detail
+                score += _score_emops_history_detail(detail=detail, quarter_aliases=quarter_aliases)
+            entry["_score"] = score
+            candidates.append(entry)
+
+    if not candidates:
+        return {
+            "resolved_event_date": "",
+            "matched_event_key": normalized_event_key,
+            "status": "unverified",
+            "source": "emops_history",
+            "reason": "historical_event_not_found",
+            "data_gaps": ["historical_event_not_found"],
+        }
+
+    best = sorted(
+        candidates,
+        key=lambda item: (
+            -float(item.get("_score", 0)),
+            str((item.get("detail") or {}).get("event_date", "")),
+            str(item.get("announcement_date", "")),
+        ),
+    )[0]
+    detail = best.get("detail", {}) if isinstance(best.get("detail"), dict) else {}
+    event_date = str(detail.get("event_date", "")).strip()
+    if not event_date:
+        event_date = _extract_event_date_from_text(" ".join([best.get("subject", ""), detail.get("statement", "")]))
+    if not event_date:
+        return {
+            "resolved_event_date": "",
+            "matched_event_key": normalized_event_key,
+            "status": "unverified",
+            "source": "emops_history",
+            "reason": "historical_event_date_missing",
+            "data_gaps": ["historical_event_date_missing"],
+        }
+
+    return {
+        "resolved_event_date": event_date,
+        "matched_event_key": normalized_event_key,
+        "status": "resolved_from_emops_history",
+        "source": "emops_history",
+        "reason": "historical_event_key_match",
+        "data_gaps": [],
+        "evidence": {
+            "announcement_date": best.get("announcement_date", ""),
+            "subject": best.get("subject", ""),
+            "detail_url": best.get("detail_url", ""),
+            "statement_excerpt": compact_text(detail.get("statement", ""), max_length=220),
+        },
+    }
+
+
+def fetch_yahoo_calendar_event_date(
+    *,
+    stock_code: str,
+    stock_name: str,
+    symbol: str,
+    event_key: str,
+) -> dict[str, Any]:
+    """Resolve a historical earnings-call date from Yahoo TW calendar events."""
+    normalized_event_key = normalize_event_key("法說會", event_key)
+    quarter_aliases = _build_quarter_aliases(normalized_event_key)
+    events = _fetch_yahoo_calendar_events(symbol=symbol)
+    earnings_events = [event for event in events if event.get("event_type") == "earningsCall"]
+    if not earnings_events:
+        return {
+            "resolved_event_date": "",
+            "matched_event_key": normalized_event_key,
+            "status": "unverified",
+            "source": "yahoo_calendar",
+            "reason": "yahoo_calendar_event_not_found",
+            "data_gaps": ["yahoo_calendar_event_not_found"],
+        }
+
+    scored_events: list[dict[str, Any]] = []
+    for event in earnings_events:
+        score = _score_yahoo_calendar_event(event=event, quarter_aliases=quarter_aliases)
+        if score > 0:
+            item = dict(event)
+            item["_score"] = score
+            scored_events.append(item)
+
+    if not scored_events:
+        return {
+            "resolved_event_date": "",
+            "matched_event_key": normalized_event_key,
+            "status": "unverified",
+            "source": "yahoo_calendar",
+            "reason": "yahoo_calendar_quarter_unresolved",
+            "data_gaps": ["yahoo_calendar_quarter_unresolved"],
+            "evidence": {
+                "candidate_dates": [event.get("event_date", "") for event in earnings_events[:5] if event.get("event_date")],
+                "candidate_messages": [event.get("information", "") for event in earnings_events[:3] if event.get("information")],
+            },
+        }
+
+    best = sorted(
+        scored_events,
+        key=lambda item: (
+            -float(item.get("_score", 0)),
+            str(item.get("event_date", "")),
+            str(item.get("information", "")),
+        ),
+    )[0]
+    return {
+        "resolved_event_date": str(best.get("event_date", "")).strip(),
+        "matched_event_key": normalized_event_key,
+        "status": "resolved_from_yahoo_calendar",
+        "source": "yahoo_calendar",
+        "reason": "historical_event_key_match_from_yahoo_calendar",
+        "data_gaps": [],
+        "evidence": {
+            "event_type_name": best.get("event_type_name", ""),
+            "information": best.get("information", ""),
+            "place": best.get("place", ""),
+            "detail_date": best.get("detail_date", ""),
+            "source_url": best.get("source_url", ""),
+        },
+    }
+
+
 def collect_official_event_records(
     *,
     stock_code: str,
@@ -137,6 +455,8 @@ def collect_official_event_records(
     end_date: str,
     event_date: str = "",
     event_key: str = "",
+    prefetched_record: dict[str, Any] | None = None,
+    disable_latest_fetch: bool = False,
 ) -> dict[str, Any]:
     """Collect official-source records for supported event types."""
     empty_payload = {
@@ -149,13 +469,15 @@ def collect_official_event_records(
     if event_type != "法說會" or not stock_code:
         return empty_payload
 
-    record = fetch_mops_investor_conference(
-        stock_code=stock_code,
-        stock_name=stock_name,
-        symbol=symbol,
-        event_date=event_date,
-        event_key=event_key,
-    )
+    record = prefetched_record
+    if record is None and not disable_latest_fetch:
+        record = fetch_mops_investor_conference(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            symbol=symbol,
+            event_date=event_date,
+            event_key=event_key,
+        )
     if not record:
         gaps = ["mops_official_record_unavailable"]
         empty_payload["data_gaps"] = gaps
@@ -269,6 +591,18 @@ def fetch_mops_investor_conference(
         source_type="official",
     )
 
+    official_event_key = _infer_event_key(
+        " ".join(
+            part
+            for part in (
+                stock_name,
+                parsed_date,
+                summary,
+                website_url,
+            )
+            if part
+        )
+    )
     summary_parts = [part for part in (location, summary) if part]
     return {
         "stock_code": stock_code,
@@ -288,6 +622,7 @@ def fetch_mops_investor_conference(
         "language": "zh-TW",
         "matched_query": "",
         "official_page_url": website_url,
+        "official_event_key": official_event_key,
         **flags,
     }
 
@@ -886,6 +1221,348 @@ def _infer_source_name(url: str) -> str:
     return parsed.netloc or "Official IR"
 
 
+def _fetch_emops_history_entries(*, stock_code: str, year: int) -> list[dict[str, Any]]:
+    html = _fetch_emops_history_page(
+        params={
+            "TYPEK": "all",
+            "co_id": stock_code,
+            "year": str(year),
+            "month": "all",
+            "step": "0",
+            "query": "co",
+            "colorchg": "1",
+        }
+    )
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "lxml")
+    entries: list[dict[str, Any]] = []
+    for row in soup.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 4:
+            continue
+        announcement_date = _normalize_possible_slash_date(cells[0].get_text(" ", strip=True))
+        announcement_time = cells[1].get_text(" ", strip=True).replace("\xa0", "")
+        subject = cells[2].get_text(" ", strip=True)
+        if not subject:
+            continue
+        anchor = cells[3].find("a", href=True)
+        detail_url = _extract_emops_history_detail_url(anchor.get("href", "") if anchor else "")
+        entries.append(
+            {
+                "announcement_date": announcement_date,
+                "announcement_time": announcement_time,
+                "subject": subject,
+                "detail_url": detail_url,
+            }
+        )
+    return entries
+
+
+def _fetch_yahoo_calendar_events(*, symbol: str) -> list[dict[str, Any]]:
+    if not symbol:
+        return []
+    url = _YAHOO_TW_CALENDAR_URL.format(symbol=symbol)
+    try:
+        response = requests.get(
+            url,
+            headers={**_HEADERS, "Referer": "https://tw.stock.yahoo.com/"},
+            timeout=8,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        return []
+
+    payload = _extract_yahoo_root_app_payload(response.text)
+    if not payload:
+        return []
+
+    calendars = (
+        payload.get("context", {})
+        .get("dispatcher", {})
+        .get("stores", {})
+        .get("SymbolCalendarsStore", {})
+        .get("symbolCalendars", {})
+        .get("data", {})
+        .get("calendars", [])
+    )
+    if not isinstance(calendars, list):
+        return []
+
+    events: list[dict[str, Any]] = []
+    for item in calendars:
+        if not isinstance(item, dict):
+            continue
+        detail = item.get("detail", {})
+        if not isinstance(detail, dict):
+            detail = {}
+        event_date = _normalize_possible_iso_datetime(detail.get("date") or item.get("date", ""))
+        events.append(
+            {
+                "symbol": str(item.get("symbol", "")).strip(),
+                "symbol_name": str(item.get("symbolName", "")).strip(),
+                "event_type": str(item.get("eventType", "")).strip(),
+                "event_type_name": str(item.get("eventTypeName", "")).strip(),
+                "event_date": event_date,
+                "detail_date": str(detail.get("date", "")).strip(),
+                "information": str(detail.get("information", "")).strip(),
+                "place": str(detail.get("place", "")).strip(),
+                "corp_review_name": str(detail.get("corpReviewName", "")).strip(),
+                "source_url": url,
+            }
+        )
+    return events
+
+
+def _fetch_emops_history_detail(detail_url: str) -> dict[str, Any]:
+    if not detail_url:
+        return {}
+    html = _fetch_emops_history_page(
+        url=detail_url,
+        params=None,
+        referer=_EMOPS_HISTORY_URL,
+    )
+    if not html:
+        return {}
+
+    soup = BeautifulSoup(html, "lxml")
+    detail = {
+        "event_date": "",
+        "subject": "",
+        "statement": "",
+        "detail_url": detail_url,
+    }
+    subject_cells = soup.find_all("td", class_="wa-d-10")
+    for cell in subject_cells:
+        label = cell.get_text(" ", strip=True)
+        if label == "Subject":
+            sibling = cell.find_next_sibling("td")
+            if sibling is not None:
+                detail["subject"] = sibling.get_text(" ", strip=True)
+        elif label == "Date of events":
+            sibling = cell.find_next_sibling("td")
+            if sibling is not None:
+                detail["event_date"] = _normalize_possible_slash_date(sibling.get_text(" ", strip=True))
+        elif label == "Statement":
+            sibling = cell.find_next_sibling("td")
+            if sibling is not None:
+                detail["statement"] = sibling.get_text(" ", strip=True)
+    return detail
+
+
+def _extract_yahoo_root_app_payload(html: str) -> dict[str, Any]:
+    marker = "root.App.main = "
+    start = str(html or "").find(marker)
+    if start < 0:
+        return {}
+    start += len(marker)
+    blob = _extract_json_object_blob(str(html), start)
+    if not blob:
+        return {}
+    blob = re.sub(r":undefined([,}])", r":null\1", blob)
+    try:
+        payload = json.loads(blob)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_json_object_blob(text: str, start: int) -> str:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text[start:], start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return ""
+
+
+def _extract_emops_history_detail_url(raw_href: str) -> str:
+    match = re.search(r'gotoURL\("([^"]+)"\)', raw_href)
+    if not match:
+        return ""
+    path = match.group(1)
+    return urljoin("https://emops.twse.com.tw", path)
+
+
+def _fetch_emops_history_page(
+    *,
+    params: dict[str, str] | None,
+    url: str = _EMOPS_HISTORY_URL,
+    referer: str = "https://emops.twse.com.tw/",
+) -> str:
+    for delay in _EMOPS_HISTORY_RETRY_DELAYS:
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers={**_HEADERS, "Referer": referer},
+                timeout=8,
+            )
+            response.raise_for_status()
+        except requests.RequestException:
+            continue
+
+        response.encoding = "big5"
+        html = response.text
+        if _is_emops_rate_limited(html):
+            continue
+        return html
+    return ""
+
+
+def _is_emops_rate_limited(html: str) -> bool:
+    text = str(html or "")
+    return "查詢過量" in text or "please query later" in text.lower()
+
+
+def _score_emops_history_entry(*, entry: dict[str, Any], quarter_aliases: list[str]) -> int:
+    text = " ".join(
+        part for part in (entry.get("subject", ""), entry.get("announcement_date", "")) if part
+    )
+    lowered = text.lower()
+    score = 0
+    if any(alias.lower() in lowered for alias in quarter_aliases):
+        score += 6
+    if any(keyword in lowered for keyword in ("earnings conference", "earnings call", "financial results", "eps of")):
+        score += 5
+    if any(keyword in lowered for keyword in ("institutional investor conference", "investor conference")):
+        score += 2
+    return score
+
+
+def _score_emops_history_detail(*, detail: dict[str, Any], quarter_aliases: list[str]) -> int:
+    text = " ".join(part for part in (detail.get("subject", ""), detail.get("statement", "")) if part)
+    lowered = text.lower()
+    score = 0
+    if any(alias.lower() in lowered for alias in quarter_aliases):
+        score += 8
+    if detail.get("event_date"):
+        score += 4
+    if "date of institutional investor conference" in lowered:
+        score += 4
+    if any(keyword in lowered for keyword in ("guidance", "financial results", "earnings conference")):
+        score += 3
+    return score
+
+
+def _score_yahoo_calendar_event(*, event: dict[str, Any], quarter_aliases: list[str]) -> int:
+    text = " ".join(
+        part
+        for part in (
+            event.get("information", ""),
+            event.get("place", ""),
+            event.get("event_type_name", ""),
+            event.get("corp_review_name", ""),
+        )
+        if part
+    )
+    lowered = text.lower()
+    alias_matched = any(alias.lower() in lowered for alias in quarter_aliases)
+    if not alias_matched:
+        return 0
+    score = 10
+    if event.get("event_date"):
+        score += 2
+    if "法說會" in text or "earnings" in lowered:
+        score += 2
+    return score
+
+
+def _supports_historical_earnings_scope(*, stock_code: str, event_key: str) -> bool:
+    code = str(stock_code or "").strip()
+    normalized_event_key = normalize_event_key("法說會", event_key)
+    if code not in _SUPPORTED_HISTORICAL_EARNINGS_CODES:
+        return False
+    if not normalized_event_key:
+        return False
+    return normalized_event_key >= _SUPPORTED_HISTORICAL_EARNINGS_MIN_EVENT_KEY
+
+
+def _build_quarter_aliases(event_key: str) -> list[str]:
+    year = int(event_key[:4])
+    quarter = int(event_key[-1])
+    quarter_word = ("First", "Second", "Third", "Fourth")[quarter - 1]
+    chinese_quarter = ("第一", "第二", "第三", "第四")[quarter - 1]
+    roc_year = year - 1911
+    aliases = [
+        event_key,
+        f"{year} Q{quarter}",
+        f"Q{quarter} {year}",
+        f"{year}Q{quarter}",
+        f"{quarter}Q{str(year)[-2:]}",
+        f"{quarter_word} Quarter {year}",
+        f"{year} {quarter_word} Quarter",
+        f"{year}年第{quarter}季",
+        f"{year}年{chinese_quarter}季",
+        f"{year}年{chinese_quarter}季度",
+        f"{roc_year}年第{quarter}季",
+        f"{roc_year}年{chinese_quarter}季",
+        f"{roc_year}年{chinese_quarter}季度",
+        f"民國{roc_year}年第{quarter}季",
+        f"民國{roc_year}年{chinese_quarter}季",
+        f"民國{roc_year}年{chinese_quarter}季度",
+        f"{_int_to_zh_digits(roc_year)}年{chinese_quarter}季",
+        f"{_int_to_zh_digits(roc_year)}年{chinese_quarter}季度",
+    ]
+    return dedupe_strings(aliases)
+
+
+def _extract_event_date_from_text(text: str) -> str:
+    for value in _find_iso_dates(text):
+        if value:
+            return value
+    slash_match = re.search(r"(20\d{2})/(\d{1,2})/(\d{1,2})", text)
+    if slash_match:
+        year, month, day = slash_match.groups()
+        return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
+    natural_match = re.search(r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s*(20\d{2})", text, re.I)
+    if natural_match:
+        month_name, day, year = natural_match.groups()
+        return datetime.strptime(f"{month_name} {day} {year}", "%B %d %Y").strftime("%Y-%m-%d")
+    return ""
+
+
+def _normalize_possible_slash_date(raw: str) -> str:
+    match = re.search(r"(20\d{2})/(\d{1,2})/(\d{1,2})", raw)
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
+
+
+def _normalize_possible_iso_datetime(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    iso_head = text.split("T", 1)[0]
+    if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", iso_head):
+        return iso_head
+    return _normalize_possible_slash_date(text)
+
+
+def _int_to_zh_digits(value: int) -> str:
+    digit_map = {"0": "零", "1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
+    return "".join(digit_map.get(ch, ch) for ch in str(value))
+
+
 def _find_iso_dates(text: str) -> list[str]:
     matches = []
     for match in re.finditer(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})", text):
@@ -895,6 +1572,33 @@ def _find_iso_dates(text: str) -> list[str]:
         except ValueError:
             continue
     return matches
+
+
+def _date_within_range(value: str, *, start_date: str, end_date: str) -> bool:
+    if not value:
+        return False
+    if start_date and value < start_date:
+        return False
+    if end_date and value > end_date:
+        return False
+    return True
+
+
+def _infer_event_key(text: str) -> str:
+    blob = str(text or "")
+    quarter_patterns = (
+        r"(20\d{2})\s*[/-]?\s*[Qq]([1-4])",
+        r"(20\d{2})\s*年\s*第\s*([1-4])\s*季",
+        r"(20\d{2})\s*年第([1-4])季",
+        r"(20\d{2})/q([1-4])",
+    )
+    for pattern in quarter_patterns:
+        match = re.search(pattern, blob)
+        if not match:
+            continue
+        year, quarter = match.groups()
+        return f"{year}Q{quarter}"
+    return ""
 
 
 def _extract_label_value(table: BeautifulSoup, label: str) -> str:
@@ -919,5 +1623,3 @@ def _parse_mops_date(raw: str) -> str:
     year, month, day = match.groups()
     western_year = int(year) + 1911 if int(year) < 1911 else int(year)
     return datetime(western_year, int(month), int(day)).strftime("%Y-%m-%d")
-
-

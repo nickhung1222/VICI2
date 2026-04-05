@@ -9,6 +9,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tools.news_archive import (
+    _build_goodinfo_record,
     build_news_dedupe_key,
     dedupe_news_articles,
     fetch_goodinfo_discovery_records,
@@ -89,6 +90,11 @@ def test_fetch_news_archive_merges_primary_and_secondary(monkeypatch):
 
 
 def test_fetch_goodinfo_discovery_records_parses_data_endpoint(monkeypatch):
+    init_html = """
+    <html><body><script>
+    setCookie('CLIENT_KEY', '2.4|42076.3590035775|46520.8034480219|' + String(GetTimezoneOffset()));
+    </script></body></html>
+    """
     html = """
     <section>
       <table>
@@ -111,6 +117,7 @@ def test_fetch_goodinfo_discovery_records_parses_data_endpoint(monkeypatch):
 
         def __init__(self, text):
             self.text = text
+            self.encoding = "utf-8"
 
         def raise_for_status(self):
             return None
@@ -118,9 +125,11 @@ def test_fetch_goodinfo_discovery_records_parses_data_endpoint(monkeypatch):
     class FakeSession:
         def __init__(self):
             self.cookies = type("Cookies", (), {"set": lambda *args, **kwargs: None})()
+            self.calls = 0
 
         def get(self, *args, **kwargs):
-            return FakeResponse(html)
+            self.calls += 1
+            return FakeResponse(init_html if self.calls == 1 else html)
 
     monkeypatch.setattr("tools.news_archive.requests.Session", lambda: FakeSession())
 
@@ -181,6 +190,29 @@ def test_fetch_goodinfo_discovery_records_falls_back_to_browser(monkeypatch):
     assert len(records) == 1
     assert records[0]["retrieval_method"] == "goodinfo_browser_index"
     assert "goodinfo_http_timeout" in data_gaps
+
+
+def test_build_goodinfo_record_filters_cross_stock_false_positives():
+    record = _build_goodinfo_record(
+        row_result={
+            "source_name": "Anue鉅亨",
+            "headline": "鴻海與廣達法說會同日登場",
+            "article_url": "https://example.com/foxconn-quanta",
+            "published_at": "2025-01-15",
+            "snippet": "市場關注鴻海與廣達法說會",
+            "raw_row_text": "市場關注鴻海與廣達法說會",
+        },
+        stock_code="2330",
+        query_signature="2330|2025-01-09|2025-01-15||Anue鉅亨",
+        page=1,
+        goodinfo_url="https://goodinfo.tw/tw/StockAnnounceList.asp",
+        retrieval_method="goodinfo_http_index",
+        date_from="2025-01-09",
+        date_to="2025-01-15",
+        match_tokens=["台積電", "2330"],
+    )
+
+    assert record is None
 
 
 def test_fetch_goodinfo_discovery_records_waits_for_browser_rows(monkeypatch):

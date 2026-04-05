@@ -62,7 +62,10 @@ def test_collect_event_records_returns_structured_payload(monkeypatch):
         },
     ]
 
+    call_count = {"search": 0}
+
     def fake_search_news(query, date_from, date_to, max_results, **kwargs):
+        call_count["search"] += 1
         return fake_articles
 
     def fake_fetch_article_content(url, news_id=""):
@@ -106,9 +109,132 @@ def test_collect_event_records_returns_structured_payload(monkeypatch):
     assert payload["records"][1]["article_type"] == "法說前預期"
     assert payload["records"][0]["summary"].startswith("Q1 營收與毛利率展望")
     assert payload["data_completeness"]["official_sources_included"] is False
-    assert payload["record_breakdown"]["archive_records"] >= 1
+    assert payload["record_breakdown"]["archive_records"] == 1
+    assert payload["record_breakdown"]["secondary_source_records"] == 1
+    assert payload["record_breakdown"]["live_fetched_records"] == 0
+    assert sum(payload["record_breakdown"].values()) == payload["record_count"]
+    assert call_count["search"] == 1
     assert payload["official_artifacts"] == []
     assert payload["todo_items"] == []
+
+
+def test_collect_event_records_marks_post_event_earnings_related_articles(monkeypatch):
+    fake_articles = [
+        {
+            "headline": "台積電法說後法人解讀 聚焦毛利率與資本支出",
+            "published_at": "2025-04-18",
+            "source": "cnyes",
+            "url": "https://example.com/post-related",
+            "snippet": "法說會後法人持續追蹤展望與capex。",
+            "source_article_id": "2",
+            "retrieval_method": "cnyes_category",
+            "is_primary_source": True,
+            "dedupe_key": "https://example.com/post-related",
+        },
+        {
+            "headline": "台積電慈善基金會攜手熊本大學締結合作協議",
+            "published_at": "2025-04-18",
+            "source": "cnyes",
+            "url": "https://example.com/post-noise",
+            "snippet": "與法說內容無直接關聯。",
+            "source_article_id": "3",
+            "retrieval_method": "cnyes_category",
+            "is_primary_source": True,
+            "dedupe_key": "https://example.com/post-noise",
+        },
+    ]
+
+    monkeypatch.setattr("tools.event_collector.search_news", lambda *args, **kwargs: fake_articles)
+    monkeypatch.setattr("tools.event_collector.fetch_article_content", lambda **kwargs: "")
+    monkeypatch.setattr(
+        "tools.event_collector.collect_official_event_records",
+        lambda **kwargs: {
+            "records": [],
+            "data_gaps": [],
+            "official_artifacts": [],
+            "earnings_digest": {},
+            "todo_items": [],
+        },
+    )
+
+    payload = collect_event_records(
+        symbol="2330",
+        stock_name="台積電",
+        event_type="法說會",
+        start_date="2025-04-18",
+        end_date="2025-04-24",
+        event_date="2025-04-17",
+        event_key="2025Q1",
+        max_results=5,
+    )
+
+    related_record = next(record for record in payload["records"] if "法人解讀" in record["headline"])
+    noise_record = next(record for record in payload["records"] if "慈善基金會" in record["headline"])
+
+    assert related_record["event_phase"] == "post_event"
+    assert related_record["article_type"] in {"法說後解讀", "法人解讀"}
+    assert related_record["is_post_event_earnings_related"] is True
+    assert related_record["post_event_relevance_score"] >= 3
+    assert "mentions_earnings_call" in related_record["post_event_relevance_reasons"]
+
+    assert noise_record["is_post_event_earnings_related"] is False
+    assert noise_record["post_event_relevance_score"] < 3
+    assert "contains_noise_topic" in noise_record["post_event_relevance_reasons"]
+
+
+def test_collect_event_records_breakdown_uses_final_deduped_articles(monkeypatch):
+    fake_articles = [
+        {
+            "headline": "台積電法說會前市場預期 AI 需求續強",
+            "published_at": "2025-04-15",
+            "source": "cnyes",
+            "url": "https://example.com/a",
+            "snippet": "法人預期毛利率維持高檔。",
+            "source_article_id": "1",
+            "retrieval_method": "cnyes_category",
+            "is_primary_source": True,
+            "dedupe_key": "https://example.com/a",
+        },
+        {
+            "headline": "台積電法說會前市場預期 AI 需求續強",
+            "published_at": "2025-04-15",
+            "source": "cnyes",
+            "url": "https://example.com/a",
+            "snippet": "重複資料應被去除。",
+            "source_article_id": "1",
+            "retrieval_method": "cnyes_category",
+            "is_primary_source": True,
+            "dedupe_key": "https://example.com/a",
+        },
+    ]
+
+    monkeypatch.setattr("tools.event_collector.search_news", lambda *args, **kwargs: fake_articles)
+    monkeypatch.setattr("tools.event_collector.fetch_article_content", lambda **kwargs: "")
+    monkeypatch.setattr(
+        "tools.event_collector.collect_official_event_records",
+        lambda **kwargs: {
+            "records": [],
+            "data_gaps": [],
+            "official_artifacts": [],
+            "earnings_digest": {},
+            "todo_items": [],
+        },
+    )
+
+    payload = collect_event_records(
+        symbol="2330",
+        stock_name="台積電",
+        event_type="法說會",
+        start_date="2025-04-01",
+        end_date="2025-04-17",
+        event_date="2025-04-17",
+        event_key="2025Q1",
+        max_results=5,
+    )
+
+    assert payload["record_count"] == 1
+    assert payload["record_breakdown"]["archive_records"] == 1
+    assert sum(payload["record_breakdown"].values()) == 1
 
 
 def test_collect_event_records_clamps_pre_event_report_window(monkeypatch):

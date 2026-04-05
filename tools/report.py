@@ -1,5 +1,7 @@
 """Save reports and assemble event-report payloads."""
 
+from __future__ import annotations
+
 import json
 from datetime import datetime
 from pathlib import Path
@@ -53,6 +55,7 @@ def save_event_record(record: dict, topic: str) -> str:
 def build_event_report_payload(
     event_collection: dict[str, Any],
     heat_analysis: Optional[dict[str, Any]] = None,
+    post_event_analysis: Optional[dict[str, Any]] = None,
     expectation_analysis: Optional[dict[str, Any]] = None,
     event_study: Optional[dict[str, Any]] = None,
     generated_at: Optional[str] = None,
@@ -61,6 +64,7 @@ def build_event_report_payload(
     """Assemble a JSON-friendly event report payload from structured inputs."""
     event_collection = event_collection or {}
     heat_analysis = heat_analysis or {}
+    post_event_analysis = post_event_analysis or {}
     expectation_analysis = expectation_analysis or {}
     event_study = event_study or {}
 
@@ -71,16 +75,20 @@ def build_event_report_payload(
     )
     sections = {
         "event_summary": _build_event_summary_section(event_collection, heat_analysis),
+        "pre_event_narratives": _build_narrative_section(event_collection, {"pre_event"}),
+        "post_event_narratives": _build_narrative_section(
+            event_collection,
+            {"event_day", "post_event"},
+            post_event_analysis=post_event_analysis,
+        ),
+        "narrative_shift": _build_narrative_shift_section(event_collection),
+        "heat_analysis": _build_heat_section(heat_analysis),
         "official_sources": _build_official_sources_section(event_collection),
         "earnings_highlights": _build_earnings_highlights_section(event_collection),
         "management_tone": _build_management_tone_section(event_collection),
         "qa_summary": _build_qa_summary_section(event_collection),
-        "pre_event_expectations": _build_expectation_section(expectation_analysis, "pre_event_expectations"),
-        "event_day_actuals": _build_expectation_section(expectation_analysis, "event_day_actuals"),
-        "expectation_vs_actual": _build_comparison_section(expectation_analysis),
-        "heat_analysis": _build_heat_section(heat_analysis),
         "event_study": _build_event_study_section(event_study),
-        "data_gaps": _collect_data_gaps(event_collection, heat_analysis, expectation_analysis, event_study),
+        "data_gaps": _collect_data_gaps(event_collection, heat_analysis, event_study),
         "todo_items": _build_todo_section(event_collection),
     }
     markdown = render_event_report_markdown(metadata=metadata, sections=sections)
@@ -90,6 +98,7 @@ def build_event_report_payload(
         "metadata": metadata,
         "event_collection": event_collection,
         "heat_analysis": heat_analysis,
+        "post_event_analysis": post_event_analysis,
         "expectation_analysis": expectation_analysis,
         "event_study": event_study,
         "sections": sections,
@@ -118,17 +127,10 @@ def render_event_report_markdown(
     lines.append("")
 
     lines.extend(_render_event_summary_section(sections.get("event_summary", {})))
-    lines.extend(_render_official_sources_block(sections.get("official_sources", {})))
-    lines.extend(_render_earnings_highlights_block(sections.get("earnings_highlights", {})))
-    lines.extend(_render_management_tone_block(sections.get("management_tone", {})))
-    lines.extend(_render_qa_block(sections.get("qa_summary", {})))
-    lines.extend(_render_expectation_block("六、事件前預期", sections.get("pre_event_expectations", {}), empty_message="尚未提供事件前預期資料。"))
-    lines.extend(_render_expectation_block("七、事件當天實際", sections.get("event_day_actuals", {}), empty_message="尚未提供事件當天實際資料。"))
-    lines.extend(_render_comparison_block(sections.get("expectation_vs_actual", {})))
-    lines.extend(_render_heat_block(sections.get("heat_analysis", {})))
-    lines.extend(_render_event_study_block(sections.get("event_study", {})))
-    lines.extend(_render_data_gaps_block(sections.get("data_gaps", [])))
-    lines.extend(_render_todo_block(sections.get("todo_items", [])))
+    lines.extend(_render_narrative_block("二、市場事件前敘事", sections.get("pre_event_narratives", {}), "尚未提供事件前敘事資料。"))
+    lines.extend(_render_narrative_block("三、市場事件後敘事", sections.get("post_event_narratives", {}), "尚未提供事件後敘事資料。"))
+    lines.extend(_render_narrative_shift_block(sections.get("narrative_shift", {})))
+    lines.extend(_render_heat_block(sections.get("heat_analysis", {}), title="五、熱度分析"))
 
     lines.append("")
     lines.append("*報告由 VICI2 台灣新聞事件研究 Agent 自動生成*")
@@ -187,6 +189,7 @@ def _build_event_summary_section(event_collection: dict[str, Any], heat_analysis
         "event_type": query.get("event_type", ""),
         "event_date": query.get("event_date", ""),
         "event_key": query.get("event_key", ""),
+        "data_coverage_note": _build_data_coverage_note(query.get("event_date", "")),
         "time_range": query.get("time_range", {}),
         "record_count": event_collection.get("record_count", 0),
         "record_breakdown": event_collection.get("record_breakdown", {}),
@@ -197,7 +200,21 @@ def _build_event_summary_section(event_collection: dict[str, Any], heat_analysis
         "heat_mode": heat_analysis.get("comparison_mode", ""),
         "official_artifact_count": len(event_collection.get("official_artifacts", [])),
         "todo_count": len(event_collection.get("todo_items", [])),
+        "pre_event_record_count": _count_records_by_phase(event_collection, {"pre_event"}),
+        "post_event_record_count": _count_records_by_phase(event_collection, {"event_day", "post_event"}),
     }
+
+
+def _build_data_coverage_note(event_date: Any) -> str:
+    base_note = "目前新聞資料來源實際可用區間主要自 2024-10 起；更早日期的法說會可能僅產生空報告或資料不足結果。"
+    try:
+        if str(event_date).strip():
+            parsed = datetime.strptime(str(event_date).strip(), "%Y-%m-%d")
+            if parsed < datetime(2024, 10, 1):
+                return f"{base_note} 本次事件日期早於 2024-10-01，請特別留意資料覆蓋限制。"
+    except ValueError:
+        pass
+    return base_note
 
 
 def _build_official_sources_section(event_collection: dict[str, Any]) -> dict[str, Any]:
@@ -234,35 +251,104 @@ def _build_qa_summary_section(event_collection: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _build_expectation_section(expectation_analysis: dict[str, Any], section_key: str) -> dict[str, Any]:
-    if not isinstance(expectation_analysis, dict):
-        return {"rows": [], "summary": "", "data_gaps": []}
+def _build_narrative_section(
+    event_collection: dict[str, Any],
+    phases: set[str],
+    post_event_analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(event_collection, dict):
+        return {"rows": [], "summary": "", "theme_labels": [], "data_gaps": []}
 
-    rows = _extract_rows(expectation_analysis, [section_key, "rows", "items", "metrics"])
-    if not rows and isinstance(expectation_analysis.get("metrics"), list):
-        rows = _build_expectation_rows_from_metrics(expectation_analysis["metrics"], section_key)
+    query = event_collection.get("query", {}) if isinstance(event_collection, dict) else {}
+    event_type = str(query.get("event_type", "")).strip()
+    should_filter_post_event = event_type == "法說會" and bool(phases & {"event_day", "post_event"})
+    override_records = []
+    if should_filter_post_event and isinstance(post_event_analysis, dict):
+        override_records = post_event_analysis.get("records", []) or []
+    candidate_records: list[dict[str, Any]] = []
+    raw_count = 0
+    filtered_out_count = 0
+    rows: list[dict[str, Any]] = []
+    theme_labels: list[str] = []
+    source_records = override_records if override_records else event_collection.get("records", [])
+    for record in source_records:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("event_phase", "")).strip() not in phases:
+            continue
+        raw_count += 1
+        if should_filter_post_event and not record.get("is_post_event_earnings_related", False):
+            filtered_out_count += 1
+            continue
+        candidate_records.append(record)
+
+    for record in candidate_records:
+        rows.append(
+            {
+                "date": record.get("article_date") or record.get("published_at", ""),
+                "headline": record.get("headline", ""),
+                "article_type": record.get("article_type", ""),
+                "source_name": record.get("source_name") or record.get("source", ""),
+                "summary": record.get("summary", ""),
+                "post_event_relevance_score": record.get("post_event_relevance_score"),
+            }
+        )
+        article_type = str(record.get("article_type", "")).strip()
+        if article_type and article_type not in theme_labels:
+            theme_labels.append(article_type)
+
+    rows.sort(key=lambda item: (str(item.get("date", "")), str(item.get("headline", ""))))
+    data_gaps: list[str] = []
+    if should_filter_post_event and filtered_out_count > 0:
+        data_gaps.append(f"post_event_noise_filtered:{filtered_out_count}")
     return {
         "rows": rows,
-        "summary": expectation_analysis.get("summary", ""),
-        "notes": expectation_analysis.get("notes", ""),
-        "data_gaps": list(expectation_analysis.get("data_gaps", [])),
+        "summary": _summarize_narratives(rows),
+        "theme_labels": theme_labels[:5],
+        "data_gaps": data_gaps,
+        "raw_count": raw_count,
+        "selected_count": len(rows),
+        "analysis_report": (
+            str((post_event_analysis or {}).get("report", "")).strip()
+            if should_filter_post_event
+            else ""
+        ),
+        "analysis_mode": (
+            str((post_event_analysis or {}).get("mode", "")).strip()
+            if should_filter_post_event
+            else ""
+        ),
+        "analysis_used_record_count": (
+            (post_event_analysis or {}).get("used_record_count")
+            if should_filter_post_event
+            else None
+        ),
     }
 
 
-def _build_comparison_section(expectation_analysis: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(expectation_analysis, dict):
-        return {"rows": [], "summary": "", "data_gaps": []}
+def _build_narrative_shift_section(event_collection: dict[str, Any]) -> dict[str, Any]:
+    pre_section = _build_narrative_section(event_collection, {"pre_event"})
+    post_section = _build_narrative_section(event_collection, {"event_day", "post_event"})
+    pre_types = pre_section.get("theme_labels", [])
+    post_types = post_section.get("theme_labels", [])
 
-    rows = _extract_rows(expectation_analysis, ["comparison_rows", "comparisons", "metric_comparisons"])
-    if not rows and isinstance(expectation_analysis.get("metrics"), list):
-        rows = _build_comparison_rows_from_metrics(expectation_analysis["metrics"])
+    summary_parts = [
+        f"事件前敘事筆數 {len(pre_section.get('rows', []))}",
+        f"事件後敘事筆數 {len(post_section.get('rows', []))}",
+    ]
+    if pre_types:
+        summary_parts.append(f"事件前主題偏向 {', '.join(pre_types[:3])}")
+    if post_types:
+        summary_parts.append(f"事件後主題偏向 {', '.join(post_types[:3])}")
+    if not post_section.get("rows"):
+        summary_parts.append("目前仍以事件前敘事為主，尚缺事件後解讀。")
+
+    appeared_after = [label for label in post_types if label not in pre_types]
+    faded_after = [label for label in pre_types if label not in post_types]
     return {
-        "rows": rows,
-        "summary": expectation_analysis.get(
-            "comparison_summary",
-            expectation_analysis.get("summary", _summarize_metric_statuses(expectation_analysis.get("status_counts", {}))),
-        ),
-        "data_gaps": list(expectation_analysis.get("data_gaps", [])),
+        "summary": "；".join(summary_parts),
+        "appeared_after_event": appeared_after[:5],
+        "faded_after_event": faded_after[:5],
     }
 
 
@@ -296,11 +382,10 @@ def _build_todo_section(event_collection: dict[str, Any]) -> list[dict[str, Any]
 def _collect_data_gaps(
     event_collection: dict[str, Any],
     heat_analysis: dict[str, Any],
-    expectation_analysis: dict[str, Any],
     event_study: dict[str, Any],
 ) -> list[str]:
     gaps: list[str] = []
-    for source in (event_collection, heat_analysis, expectation_analysis, event_study):
+    for source in (event_collection, heat_analysis, event_study):
         if isinstance(source, dict):
             source_gaps = source.get("data_gaps", [])
             if isinstance(source_gaps, list):
@@ -308,8 +393,6 @@ def _collect_data_gaps(
 
     if not heat_analysis:
         gaps.append("heat_analysis_missing")
-    if not expectation_analysis:
-        gaps.append("expectation_analysis_missing")
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -337,10 +420,13 @@ def _render_event_summary_section(section: dict[str, Any]) -> list[str]:
     lines.append(f"- **事件日期**：{_format_value(section.get('event_date'))}")
     lines.append(f"- **事件鍵**：{_format_value(section.get('event_key'))}")
     lines.append(f"- **記錄數**：{_format_value(section.get('record_count'))}")
+    lines.append(f"- **事件前敘事筆數**：{_format_value(section.get('pre_event_record_count'))}")
+    lines.append(f"- **事件後敘事筆數**：{_format_value(section.get('post_event_record_count'))}")
     lines.append(f"- **官方來源數**：{_format_value(section.get('official_artifact_count'))}")
     lines.append(f"- **待辦數**：{_format_value(section.get('todo_count'))}")
     lines.append(f"- **比較模式**：{_format_value(section.get('comparison_strategy', {}).get('comparison_mode'))}")
     lines.append(f"- **資料來源**：{_format_value(section.get('sources'))}")
+    lines.append(f"- **資料覆蓋說明**：{_format_value(section.get('data_coverage_note'))}")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -348,7 +434,7 @@ def _render_event_summary_section(section: dict[str, Any]) -> list[str]:
 
 
 def _render_official_sources_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 二、官方來源清單", ""]
+    lines = ["## 六、官方來源清單", ""]
     rows = section.get("rows", []) if isinstance(section, dict) else []
     if rows:
         lines.append(_render_metric_table(rows, ["類型", "來源", "URL", "狀態", "摘錄"]))
@@ -362,7 +448,7 @@ def _render_official_sources_block(section: dict[str, Any]) -> list[str]:
 
 
 def _render_earnings_highlights_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 三、法說重點", ""]
+    lines = ["## 七、法說重點", ""]
     financial_snapshot = section.get("financial_snapshot", {}) if isinstance(section, dict) else {}
     official_takeaways = section.get("official_takeaways", []) if isinstance(section, dict) else []
 
@@ -395,7 +481,7 @@ def _render_earnings_highlights_block(section: dict[str, Any]) -> list[str]:
 
 
 def _render_management_tone_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 四、管理層態度", ""]
+    lines = ["## 八、管理層態度", ""]
     if not section:
         lines.append("尚未提供管理層態度資料。")
         lines.append("")
@@ -420,7 +506,7 @@ def _render_management_tone_block(section: dict[str, Any]) -> list[str]:
 
 
 def _render_qa_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 五、Q&A 摘要", ""]
+    lines = ["## 九、Q&A 摘要", ""]
     rows = section.get("rows", []) if isinstance(section, dict) else []
     if rows:
         lines.append(_render_metric_table(rows, ["主題", "問題", "回答", "來源"]))
@@ -436,14 +522,17 @@ def _render_qa_block(section: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render_expectation_block(title: str, section: dict[str, Any], empty_message: str) -> list[str]:
+def _render_narrative_block(title: str, section: dict[str, Any], empty_message: str) -> list[str]:
     lines = [f"## {title}", ""]
     rows = section.get("rows", []) if isinstance(section, dict) else []
     summary = section.get("summary", "") if isinstance(section, dict) else ""
-    notes = section.get("notes", "") if isinstance(section, dict) else ""
+    theme_labels = section.get("theme_labels", []) if isinstance(section, dict) else []
+    analysis_report = section.get("analysis_report", "") if isinstance(section, dict) else ""
+    analysis_mode = section.get("analysis_mode", "") if isinstance(section, dict) else ""
+    analysis_used_record_count = section.get("analysis_used_record_count") if isinstance(section, dict) else None
 
     if rows:
-        lines.append(_render_metric_table(rows, ["指標", "內容", "來源"]))
+        lines.append(_render_metric_table(rows, ["日期", "標題", "類型", "來源", "摘要"]))
         lines.append("")
     else:
         lines.append(empty_message)
@@ -451,8 +540,18 @@ def _render_expectation_block(title: str, section: dict[str, Any], empty_message
 
     if summary:
         lines.append(f"- **摘要**：{summary}")
-    if notes:
-        lines.append(f"- **備註**：{notes}")
+    if theme_labels:
+        lines.append(f"- **主要敘事類型**：{_format_value(theme_labels)}")
+    if analysis_report:
+        if analysis_mode:
+            lines.append(f"- **整理模式**：{_format_value(analysis_mode)}")
+        if analysis_used_record_count is not None:
+            lines.append(f"- **整理使用文章數**：{_format_value(analysis_used_record_count)}")
+        lines.append("- **重點整理**：")
+        for paragraph in str(analysis_report).splitlines():
+            paragraph = paragraph.strip()
+            if paragraph:
+                lines.append(f"  - {paragraph}")
     if section.get("data_gaps"):
         lines.append(f"- **資料缺口**：{_format_value(section.get('data_gaps'))}")
     lines.append("")
@@ -461,30 +560,26 @@ def _render_expectation_block(title: str, section: dict[str, Any], empty_message
     return lines
 
 
-def _render_comparison_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 八、預期 vs 實際", ""]
-    rows = section.get("rows", []) if isinstance(section, dict) else []
-    summary = section.get("summary", "") if isinstance(section, dict) else ""
-
-    if rows:
-        lines.append(_render_metric_table(rows, ["指標", "預期", "實際", "結果"]))
+def _render_narrative_shift_block(section: dict[str, Any]) -> list[str]:
+    lines = ["## 四、前後敘事轉折", ""]
+    if not section:
+        lines.append("尚未提供前後敘事轉折資料。")
         lines.append("")
-    else:
-        lines.append("尚未提供預期與實際的比對資料。")
+        lines.append("---")
         lines.append("")
+        return lines
 
-    if summary:
-        lines.append(f"- **比對摘要**：{summary}")
-    if section.get("data_gaps"):
-        lines.append(f"- **資料缺口**：{_format_value(section.get('data_gaps'))}")
+    lines.append(f"- **摘要**：{_format_value(section.get('summary'))}")
+    lines.append(f"- **事件後新增主題**：{_format_value(section.get('appeared_after_event'))}")
+    lines.append(f"- **事件後淡出主題**：{_format_value(section.get('faded_after_event'))}")
     lines.append("")
     lines.append("---")
     lines.append("")
     return lines
 
 
-def _render_heat_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 九、熱度分析", ""]
+def _render_heat_block(section: dict[str, Any], title: str = "熱度分析") -> list[str]:
+    lines = [f"## {title}", ""]
     if not section:
         lines.append("尚未提供熱度分析資料。")
         lines.append("")
@@ -495,12 +590,36 @@ def _render_heat_block(section: dict[str, Any]) -> list[str]:
     lines.append(f"- **比較模式**：{_format_value(section.get('comparison_mode'))}")
     lines.append(f"- **事件鍵**：{_format_value(section.get('event_key'))}")
     lines.append(f"- **對照事件鍵**：{_format_value(section.get('comparison_event_key'))}")
-    lines.append(f"- **目前窗口總量**：{_format_value(section.get('current_window_total'))}")
-    lines.append(f"- **對照值**：{_format_value(section.get('comparison_value'))}")
-    lines.append(f"- **熱度比**：{_format_value(section.get('news_heat_ratio'))}")
-    lines.append(f"- **熱度標籤**：{_format_value(section.get('news_heat_label'))}")
+    lines.append(f"- **Heat 版本**：{_format_value(section.get('heat_version'))}")
+    lines.append(f"- **請求 phase**：{_format_value(section.get('requested_phase'))}")
+    available_scans = section.get("available_heat_scans", [])
+    if available_scans:
+        lines.append(f"- **已輸出 heat scan**：{_format_value(available_scans)}")
     if section.get("comparison_basis"):
         lines.append(f"- **比較基準**：{_format_value(section.get('comparison_basis'))}")
+    pre_event_scan = section.get("pre_event_heat_scan")
+    post_event_scan = section.get("post_event_heat_scan")
+    if pre_event_scan or post_event_scan:
+        if pre_event_scan:
+            lines.extend(_render_phase_heat_scan_block("事件前 heat scan", pre_event_scan))
+        if post_event_scan:
+            lines.extend(_render_phase_heat_scan_block("事件後 heat scan", post_event_scan))
+    else:
+        panels = section.get("panels", [])
+        if isinstance(panels, list) and panels:
+            lines.append("")
+            lines.append(_render_metric_table(panels, ["Panel", "Current", "Comparison", "Delta", "Status", "Summary"]))
+            lines.append("")
+            interpretations = section.get("panel_interpretation", [])
+            if interpretations:
+                lines.append("- **解讀**：")
+                for item in interpretations:
+                    lines.append(f"  - {_format_value(item)}")
+        else:
+            lines.append(f"- **目前窗口總量**：{_format_value(section.get('current_window_total'))}")
+            lines.append(f"- **對照值**：{_format_value(section.get('comparison_value'))}")
+            lines.append(f"- **熱度比**：{_format_value(section.get('news_heat_ratio'))}")
+            lines.append(f"- **熱度標籤**：{_format_value(section.get('news_heat_label'))}")
     if section.get("data_gaps"):
         lines.append(f"- **資料缺口**：{_format_value(section.get('data_gaps'))}")
     lines.append("")
@@ -509,8 +628,33 @@ def _render_heat_block(section: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render_event_study_block(section: dict[str, Any]) -> list[str]:
-    lines = ["## 十、事件研究（可選）", ""]
+def _render_phase_heat_scan_block(title: str, section: dict[str, Any]) -> list[str]:
+    lines = [f"### {title}"]
+    lines.append(f"- **窗口**：{_format_value(section.get('current_window'))}")
+    lines.append(f"- **目前筆數**：{_format_value(section.get('current_record_count'))}")
+    lines.append(f"- **對照窗口**：{_format_value(section.get('comparison_window'))}")
+    lines.append(f"- **對照筆數**：{_format_value(section.get('comparison_record_count'))}")
+    lines.append(f"- **比較基準**：{_format_value(section.get('comparison_basis'))}")
+    lines.append(f"- **熱度比**：{_format_value(section.get('news_heat_ratio'))}")
+    lines.append(f"- **熱度標籤**：{_format_value(section.get('news_heat_label'))}")
+    panels = section.get("panels", [])
+    if isinstance(panels, list) and panels:
+        lines.append("")
+        lines.append(_render_metric_table(panels, ["Panel", "Current", "Comparison", "Delta", "Status", "Summary"]))
+        lines.append("")
+    interpretations = section.get("panel_interpretation", [])
+    if interpretations:
+        lines.append("- **解讀**：")
+        for item in interpretations:
+            lines.append(f"  - {_format_value(item)}")
+    if section.get("data_gaps"):
+        lines.append(f"- **資料缺口**：{_format_value(section.get('data_gaps'))}")
+    lines.append("")
+    return lines
+
+
+def _render_event_study_block(section: dict[str, Any], title: str = "事件研究（可選）") -> list[str]:
+    lines = [f"## {title}", ""]
     if not section:
         lines.append("尚未提供事件研究資料。")
         lines.append("")
@@ -546,8 +690,8 @@ def _render_event_study_block(section: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render_data_gaps_block(data_gaps: list[str]) -> list[str]:
-    lines = ["## 十一、資料缺口與限制", ""]
+def _render_data_gaps_block(data_gaps: list[str], title: str = "資料缺口與限制") -> list[str]:
+    lines = [f"## {title}", ""]
     if data_gaps:
         for gap in data_gaps:
             lines.append(f"- {gap}")
@@ -557,8 +701,8 @@ def _render_data_gaps_block(data_gaps: list[str]) -> list[str]:
     return lines
 
 
-def _render_todo_block(todo_items: list[dict[str, Any]]) -> list[str]:
-    lines = ["## 十二、待辦事項", ""]
+def _render_todo_block(todo_items: list[dict[str, Any]], title: str = "待辦事項") -> list[str]:
+    lines = [f"## {title}", ""]
     if todo_items:
         for item in todo_items:
             lines.append(
@@ -577,51 +721,6 @@ def _render_todo_block(todo_items: list[dict[str, Any]]) -> list[str]:
         lines.append("- 無")
     lines.append("")
     return lines
-
-
-def _extract_rows(source: dict[str, Any], keys: list[str]) -> list[dict[str, Any]]:
-    for key in keys:
-        value = source.get(key)
-        if isinstance(value, list) and value:
-            return [row for row in value if isinstance(row, dict)]
-    return []
-
-
-def _build_expectation_rows_from_metrics(metrics: list[dict[str, Any]], section_key: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    observation_key = "expectation" if section_key == "pre_event_expectations" else "actual"
-
-    for metric_row in metrics:
-        if not isinstance(metric_row, dict):
-            continue
-        observation = metric_row.get(observation_key)
-        if not isinstance(observation, dict) or not observation:
-            continue
-        rows.append(
-            {
-                "metric_name": metric_row.get("metric", ""),
-                "content": _format_observation(observation),
-                "source_kind": observation.get("source_kind", ""),
-            }
-        )
-
-    return rows
-
-
-def _build_comparison_rows_from_metrics(metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for metric_row in metrics:
-        if not isinstance(metric_row, dict):
-            continue
-        rows.append(
-            {
-                "metric_name": metric_row.get("metric", ""),
-                "expectation": _format_observation(metric_row.get("expectation")),
-                "actual": _format_observation(metric_row.get("actual")),
-                "expectation_match": metric_row.get("status", ""),
-            }
-        )
-    return rows
 
 
 def _render_metric_table(rows: list[dict[str, Any]], columns: list[str]) -> str:
@@ -678,6 +777,35 @@ def _render_metric_table(rows: list[dict[str, Any]], columns: list[str]) -> str:
                         _format_value(_pick(row, ["question_summary", "question", "summary"])),
                         _format_value(_pick(row, ["answer_summary", "answer", "content"])),
                         _format_value(_pick(row, ["source_ref", "source_name", "source"])),
+                    ]
+                )
+                + " |"
+            )
+        elif columns == ["日期", "標題", "類型", "來源", "摘要"]:
+            body.append(
+                "| "
+                + " | ".join(
+                    [
+                        _format_value(_pick(row, ["date", "article_date", "published_at"])),
+                        _format_value(_pick(row, ["headline", "title"])),
+                        _format_value(_pick(row, ["article_type", "type", "label"])),
+                        _format_value(_pick(row, ["source_name", "source"])),
+                        _format_value(_pick(row, ["summary", "content", "snippet"])),
+                    ]
+                )
+                + " |"
+            )
+        elif columns == ["Panel", "Current", "Comparison", "Delta", "Status", "Summary"]:
+            body.append(
+                "| "
+                + " | ".join(
+                    [
+                        _format_value(_pick(row, ["label", "panel_id"])),
+                        _format_value(row.get("current_value")),
+                        _format_value(row.get("comparison_value")),
+                        _format_value(row.get("delta")),
+                        _format_value(row.get("status")),
+                        _format_value(row.get("summary")),
                     ]
                 )
                 + " |"
@@ -761,3 +889,34 @@ def _summarize_metric_statuses(status_counts: Any) -> str:
     ordered = ["matched", "beat", "below", "partially_matched", "unknown"]
     parts = [f"{status}: {status_counts[status]}" for status in ordered if status in status_counts]
     return "；".join(parts)
+
+
+def _count_records_by_phase(event_collection: dict[str, Any], phases: set[str]) -> int:
+    count = 0
+    for record in event_collection.get("records", []):
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("event_phase", "")).strip() in phases:
+            count += 1
+    return count
+
+
+def _summarize_narratives(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    source_names: list[str] = []
+    article_types: list[str] = []
+    for row in rows:
+        source_name = str(row.get("source_name", "")).strip()
+        article_type = str(row.get("article_type", "")).strip()
+        if source_name and source_name not in source_names:
+            source_names.append(source_name)
+        if article_type and article_type not in article_types:
+            article_types.append(article_type)
+
+    summary_parts = [f"共整理 {len(rows)} 筆敘事"]
+    if article_types:
+        summary_parts.append(f"主要類型包含 {', '.join(article_types[:3])}")
+    if source_names:
+        summary_parts.append(f"來源涵蓋 {', '.join(source_names[:3])}")
+    return "；".join(summary_parts)

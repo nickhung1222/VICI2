@@ -165,7 +165,12 @@ class GoodinfoDiscoveryAdapter:
 
     def _fetch_http_records(self) -> list[dict[str, Any]]:
         session = requests.Session()
-        session.cookies.set("CLIENT_KEY", "codex", domain="goodinfo.tw", path="/")
+        _prime_goodinfo_session(
+            session=session,
+            stock_code=self.stock_code,
+            date_from=self.date_from,
+            date_to=self.date_to,
+        )
         records: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
         match_tokens = _build_goodinfo_match_tokens(stock_code=self.stock_code, queries=self.queries)
@@ -175,8 +180,8 @@ class GoodinfoDiscoveryAdapter:
             try:
                 response = _request_with_retry(
                     session.get,
-                    _GOODINFO_NEWS_URL,
-                    params=_build_goodinfo_url_params(
+                    _GOODINFO_DATA_URL,
+                    params=_build_goodinfo_data_params(
                         stock_code=self.stock_code,
                         date_from=self.date_from,
                         date_to=self.date_to,
@@ -1072,9 +1077,7 @@ def _build_goodinfo_record(
     normalized_text = normalize_headline(
         f"{row_result.get('source_name', '')} {row_result.get('headline', '')} {row_result.get('snippet', '')}"
     )
-    if retrieval_method not in {"goodinfo_http_index", "goodinfo_browser_index"} and match_tokens and not any(
-        token in normalized_text for token in match_tokens
-    ):
+    if match_tokens and not any(token in normalized_text for token in match_tokens):
         return None
     return normalize_news_article(
         source=row_result.get("source_name") or "goodinfo_discovery",
@@ -1170,6 +1173,74 @@ def _build_goodinfo_url_params(
     for source in sources:
         params.append(("NEWS_SRC", source))
     return params
+
+
+def _build_goodinfo_data_params(
+    *,
+    stock_code: str,
+    date_from: str,
+    date_to: str,
+    page: int,
+    keyword: str,
+    sources: tuple[str, ...] | list[str],
+) -> list[tuple[str, str]]:
+    news_src = ", ".join(str(item).strip() for item in sources if str(item).strip())
+    return [
+        ("STEP", "DATA"),
+        ("START_DT", date_from),
+        ("END_DT", date_to),
+        ("STOCK_ID", stock_code),
+        ("KEY_WORD", keyword),
+        ("NEWS_SRC", news_src),
+        ("PAGE", str(page)),
+    ]
+
+
+def _prime_goodinfo_session(*, session: requests.Session, stock_code: str, date_from: str, date_to: str) -> None:
+    """Prime a Goodinfo session with a browser-like CLIENT_KEY cookie."""
+    try:
+        response = _request_with_retry(
+            session.get,
+            _GOODINFO_NEWS_URL,
+            params=[
+                ("STOCK_ID", stock_code),
+                ("START_DT", date_from),
+                ("END_DT", date_to),
+            ],
+            headers=_ARCHIVE_HEADERS,
+            timeout=_GOODINFO_HTTP_TIMEOUT,
+        )
+    except requests.RequestException:
+        return
+
+    response.encoding = "utf-8"
+    prefix = _extract_goodinfo_client_key_prefix(response.text)
+    if not prefix:
+        return
+    session.cookies.set(
+        "CLIENT_KEY",
+        _build_goodinfo_client_key(prefix),
+        domain="goodinfo.tw",
+        path="/",
+    )
+
+
+def _extract_goodinfo_client_key_prefix(html: str) -> str:
+    if not html:
+        return ""
+    match = re.search(
+        r"setCookie\('CLIENT_KEY',\s*'([^']*)'\s*\+\s*String\(GetTimezoneOffset\(\)\)",
+        html,
+        flags=re.S,
+    )
+    return match.group(1) if match else ""
+
+
+def _build_goodinfo_client_key(prefix: str) -> str:
+    local_now = datetime.now().astimezone()
+    timezone_offset_minutes = int(-local_now.utcoffset().total_seconds() / 60)
+    current_day = time.time() / 86400 - timezone_offset_minutes / 1440
+    return f"{prefix}{timezone_offset_minutes}|{current_day}|{current_day}"
 
 
 def _build_goodinfo_query_signature(
