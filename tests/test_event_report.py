@@ -317,7 +317,7 @@ def test_build_event_report_payload_marks_missing_heat_analysis():
     assert "尚未提供熱度分析資料。" in payload["markdown"]
 
 
-def test_build_event_report_payload_no_longer_requires_expectation_analysis():
+def test_build_event_report_payload_keeps_core_sections_without_expectation_payload():
     payload = build_event_report_payload(
         event_collection=_make_event_collection(),
         heat_analysis=_make_heat_analysis(),
@@ -325,7 +325,7 @@ def test_build_event_report_payload_no_longer_requires_expectation_analysis():
         generated_at="2026-04-02 09:30:00",
     )
 
-    assert "expectation_analysis_missing" not in payload["data_gaps"]
+    assert "expectation_analysis" not in payload
     assert "## 二、市場事件前敘事" in payload["markdown"]
     assert "## 三、市場事件後敘事" in payload["markdown"]
 

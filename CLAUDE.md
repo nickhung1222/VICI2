@@ -49,6 +49,7 @@ VICI2 目前主打法說會事件研究的確定性 workflow，自動執行：
 - 法說後敘事收斂（post-event 新聞先寬抓，再用 deterministic relevance filter 優先保留高信心法說後解讀）
 - 事件前後熱度分析（`heat_scan --phase pre_event|post_event|both`；事件前輸出 multi-panel heat comparison，事件後輸出 coverage comparison）
 - 單一正式 Markdown 報告（目前只呈現事件摘要、事件前敘事、事件後敘事、敘事轉折、熱度分析）
+- `chat` mode 對話式入口：啟動後先說明能力與範例問法，再將自然語言請求映射為既有 `event_report` / `heat_scan` / `event_collect` / `event_study` 參數
 - 目前新聞資料來源實際可用區間主要自 2024-10 起；更早日期的法說會常見結果是空報告或資料不足
 - 新聞抓取（法說會日期有 `event_key` 時由 `EMOPS historical -> Yahoo 股市行事曆 -> MOPS latest` resolver 決定；historical resolver 目前只對台灣市值前 10 大公司且 `2024Q3` 之後的季度啟用。Yahoo 只有在 `相關訊息` 可對上季度別名時才採用，無 `event_key` 時再退回 MOPS latest resolver；Goodinfo 僅作為法說會新聞補充來源；其他事件使用 Cnyes symbol news API，皆以 normalized record schema 輸出；關鍵字 fallback 走 Cnyes 搜尋 + Google News RSS）
 - 獨立 Cnyes 個股新聞區間查詢（`tools/cnyes_stock_news.py`，也作為主流程主要來源整合）
@@ -66,7 +67,8 @@ LLM Provider：**Google Gemini**（`gemini-2.0-flash`），透過 `google-genai`
 
 ```
 VICI2/
-├── agent.py          # experimental / optional Gemini tool-use loop（僅 event_study / news_scan 模式）
+├── agent.py          # event_study 專用 Gemini adapter
+├── chat_cli.py       # chat mode 對話式 CLI 入口
 ├── pipeline.py       # 確定性 pipeline（event_collect / heat_scan / event_report）
 ├── main.py           # CLI 入口
 ├── tools/            # 各功能模組
@@ -111,6 +113,9 @@ VICI2/
 ## 執行方式
 
 ```bash
+# Chat 模式（自然語言互動入口）
+python main.py --mode chat
+
 # Event Collect 模式（結構化事件蒐集）
 python main.py --mode event_collect \
     --stock 2330.TW \
@@ -145,9 +150,6 @@ python main.py --mode event_study \
     --event-dates 2025-01-16,2025-04-17 \
     --topic "TSMC法說會"
 
-# News Scan 模式（experimental / legacy）
-python main.py --mode news_scan --query "央行升息" --days 30
-
 # Standalone Cnyes Stock News（獨立模組）
 python -m tools.cnyes_stock_news \
     --stock 2330 \
@@ -173,14 +175,14 @@ GEMINI_MODEL=gemini-2.0-flash
 
 ## 架構說明
 
-### 兩條執行路徑
+### 核心主流程
 
 | 檔案 | 模式 | 特性 |
 |------|------|------|
-| `agent.py` | `event_study`、`news_scan` | experimental / optional 路徑，由 Gemini 決定工具呼叫順序 |
 | `pipeline.py` | `event_collect`、`heat_scan`、`event_report` | 正式主流程，確定性，直接呼叫工具，輸出可重現 |
+| `agent.py` | `event_study` | 附屬 adapter，僅保留 optional 的 Gemini 驅動事件研究 |
 
-`main.py` 分別從兩個模組 import，路由到對應的執行路徑。
+`main.py` 的核心工作流由 `pipeline.py` 承擔；`agent.py` 不再視為平行主架構，只保留 `event_study` 附屬能力。
 
 ### 新聞來源整合
 
@@ -232,9 +234,6 @@ GEMINI_MODEL=gemini-2.0-flash
 5. `run_event_study` — 計算 AR / CAR（估計窗口 120 天，事件窗口 ±5 天；盤後事件可將 t=0 位移到下一交易日）
 6. `generate_chart` — 產生 CAR 走勢圖（PNG）
 7. `save_report` — 輸出 Markdown 報告到 `outputs/reports/`
-
-### News Scan 模式（簡化流程，LLM 驅動）
-1. `scrape_news` → 2. `fetch_article_content` → 3. 情緒分析 → 4. `save_report`
 
 ---
 
@@ -310,7 +309,7 @@ GEMINI_MODEL=gemini-2.0-flash
 - normalized record 統一使用 `headline` / `published_at` / `source_article_id`（不使用舊版 `title` / `date` / `news_id`）
 
 ### 新增工具（LLM 模式）
-在 `agent.py` 的 `TOOLS` 清單新增 JSON Schema 定義，再在 `execute_tool()` 加入對應的 `elif` 分支。Gemini schema 需透過 `_to_gemini_schema()` 轉換（type 要大寫）。
+在 `agent.py` 的 `EVENT_STUDY_TOOLS` 清單新增 JSON Schema 定義，再在 `_execute_event_study_tool()` 加入對應的 `elif` 分支。Gemini schema 需透過 `_to_gemini_schema()` 轉換（type 要大寫）。
 
 ### 新增確定性步驟
 在 `pipeline.py` 新增或修改函數；若需要新工具函數，放在對應的 `tools/` 模組，再從 `pipeline.py` 呼叫。
@@ -342,9 +341,6 @@ pytest tests/
 **Q：如何切換 Gemini 模型？**
 修改 `.env` 中的 `GEMINI_MODEL`，例如改為 `gemini-1.5-pro`。
 
-**Q：`event_collect` 和 `news_scan` 差在哪裡？**
-`event_collect` 是正式主流程的一部分，event-first、輸出結構化 JSON，由 `pipeline.py` 確定性執行；`news_scan` 是 experimental / legacy 的 query-first 掃描，適合快速臨時查詢。
-
 **Q：cnyes_stock_news 只能查近 2 個月嗎？**
 cnyes symbol news API 覆蓋近期約 2 個月。超過範圍時，`news_archive.py` 會自動以 Goodinfo 補充；也可以直接用 `python -m tools.cnyes_stock_news` 獨立查詢。
 
@@ -352,4 +348,6 @@ cnyes symbol news API 覆蓋近期約 2 個月。超過範圍時，`news_archive
 使用 `python -m tools.cnyes_stock_news --stock <code> --date-from YYYY-MM-DD --date-to YYYY-MM-DD`。這個入口也被 `news_archive.py` 整合進主流程，作為 stock_code 路徑的主要來源之一。
 
 **Q：`agent.py` 和 `pipeline.py` 差在哪裡？**
-`agent.py` 只處理 experimental / optional 的 LLM tool-use 模式（`event_study`、`news_scan`）。`pipeline.py` 處理正式主流程（`event_collect`、`heat_scan`、`event_report`），每一步都是固定的，不依賴 LLM。
+`pipeline.py` 是唯一的正式主流程，負責 `event_collect`、`heat_scan`、`event_report`。`agent.py` 只保留 `event_study` 的附屬 LLM adapter，不再視為平行主架構。
+
+補充：query-first 的新聞掃描入口目前已下架；若未來要擴充，應作為獨立附屬工具重建，不要混入 event-first 主流程。

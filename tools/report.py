@@ -56,7 +56,6 @@ def build_event_report_payload(
     event_collection: dict[str, Any],
     heat_analysis: Optional[dict[str, Any]] = None,
     post_event_analysis: Optional[dict[str, Any]] = None,
-    expectation_analysis: Optional[dict[str, Any]] = None,
     event_study: Optional[dict[str, Any]] = None,
     generated_at: Optional[str] = None,
     title: Optional[str] = None,
@@ -65,7 +64,6 @@ def build_event_report_payload(
     event_collection = event_collection or {}
     heat_analysis = heat_analysis or {}
     post_event_analysis = post_event_analysis or {}
-    expectation_analysis = expectation_analysis or {}
     event_study = event_study or {}
 
     metadata = _build_report_metadata(
@@ -99,7 +97,6 @@ def build_event_report_payload(
         "event_collection": event_collection,
         "heat_analysis": heat_analysis,
         "post_event_analysis": post_event_analysis,
-        "expectation_analysis": expectation_analysis,
         "event_study": event_study,
         "sections": sections,
         "data_gaps": sections["data_gaps"],

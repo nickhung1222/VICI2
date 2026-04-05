@@ -11,7 +11,7 @@
 - **法說後敘事收斂**：事件後新聞先寬抓，再用 deterministic relevance filter 優先保留較像法說後解讀 / 法人反應的高信心文章
 - **事件前後熱度分析**：`heat_scan` 支援 `--phase pre_event|post_event|both`，可分別輸出事件前與事件後的 heat scan；事件前使用 multi-panel comparison（coverage / recency / source mix），事件後聚焦 coverage comparison 與資料缺口
 - **單一正式報告**：目前正式主輸出為 `event_report` 的 Markdown 報告，聚焦事件摘要、事件前後敘事、敘事轉折與熱度分析
-- **其他模式保留**：`event_collect` / `heat_scan` 輸出結構化 JSON；`event_study` / `news_scan` 仍可獨立使用，但不作為主報告正文的一部分
+- **其他模式保留**：`event_collect` / `heat_scan` 輸出結構化 JSON；`event_study` 仍可獨立作為次級驗證能力使用，但不作為主報告正文的一部分
 - **資料覆蓋限制**：目前新聞資料來源實際可用區間主要自 `2024-10` 起；更早日期的法說會可能只能輸出空報告或 `資料不足`
 
 ---
@@ -40,6 +40,25 @@ GEMINI_MODEL=gemini-2.0-flash
 ```
 
 ### 3. 執行
+
+**Chat 模式**（自然語言互動入口）
+
+```bash
+python main.py --mode chat
+```
+
+進入後可直接輸入：
+
+- `幫我分析台積電 2025Q1 法說會`
+- `幫我做聯發科法說會前後熱度分析`
+- `蒐集鴻海 2025-03-01 到 2025-03-20 的法說會新聞`
+- `做台積電 2025-01-16,2025-04-17 的 event study`
+
+第一版 `chat mode` 目前採用 rule-based 意圖判斷，支援：
+- 啟動時自動介紹可做的事與範例問法
+- 從自然語言判斷 `event_report` / `heat_scan` / `event_collect` / `event_study`
+- 缺必要欄位時逐步追問
+- 執行前列出解析後參數並請使用者確認
 
 **Event Collect 模式**（第一階段重構：結構化事件蒐集，輸出 JSON）
 
@@ -88,12 +107,6 @@ python main.py --mode event_study \
     --topic "TSMC法說會"
 ```
 
-**News Scan 模式**（experimental / legacy：query-first 新聞掃描）
-
-```bash
-python main.py --mode news_scan --query "央行升息" --days 30
-```
-
 **Standalone Cnyes Stock News**（獨立模組，不接進主流程）
 
 ```bash
@@ -108,14 +121,15 @@ python -m tools.cnyes_stock_news \
 
 ## 架構
 
-### 兩條執行路徑
+### 核心主流程
 
 | 模組 | 負責模式 | 特性 |
 |------|---------|------|
-| `agent.py` | `event_study`、`news_scan` | experimental / optional 路徑，由 LLM 決定工具呼叫順序 |
 | `pipeline.py` | `event_collect`、`heat_scan`、`event_report` | 正式主流程，確定性執行，輸出可重現 |
+| `agent.py` | `event_study` | 附屬 adapter，僅保留 optional 的 LLM 驅動事件研究 |
+| `chat_cli.py` | `chat` | 對話式入口，將自然語言任務映射到既有 pipeline |
 
-`main.py` 依模式分別從兩個模組 import，路由到對應執行路徑。
+`main.py` 的核心工作流由 `pipeline.py` 承擔；`agent.py` 不再視為平行主架構，只保留 `event_study` 附屬能力。
 
 ### 新聞來源整合
 
@@ -142,7 +156,8 @@ python -m tools.cnyes_stock_news \
 
 ```
 VICI2/
-├── agent.py          # experimental / optional Gemini tool-use loop（event_study / news_scan）
+├── agent.py          # event_study 專用 Gemini adapter
+├── chat_cli.py       # chat mode 對話式 CLI 入口
 ├── pipeline.py       # 確定性 pipeline（event_collect / heat_scan / event_report）
 ├── main.py           # CLI 入口
 ├── tools/
@@ -208,10 +223,11 @@ The detailed decision rules and push workflow live in `AGENTS.md`.
 
 - `.env` 包含 API 金鑰，請勿提交至 git（已加入 `.gitignore`）
 - `event_report` 是目前正式主輸出；正式 Markdown 報告目前只保留 5 個段落：事件摘要、事件前敘事、事件後敘事、敘事轉折、熱度分析
-- `event_study` 與 `news_scan` 仍可獨立輸出報告，但不屬於正式主報告正文
+- `event_study` 可獨立輸出報告，但屬於附屬驗證能力，不是正式主流程
 - 目前新聞資料來源實際可用區間主要自 `2024-10` 起；`2024/09` 以前的法說會常見結果是空報告或 `資料不足`
 - Event Study 需要足夠的歷史股價資料，建議 `start_date` 早於事件日至少 **180 天**
 - 對盤後事件，報告中的 `event_date` 可能與 event study 的 `reaction_date` 不同；`reaction_date` 才是 CAR 視窗的 `t=0`
 - `event_collect` 仍可輸出 `official_artifacts`、`earnings_digest`、`todo_items`；但這些目前視為補強資料或待做事項，不列入正式報告正文
 - 法說會若提供 `event_key`，目前只對台灣市值前 10 大公司且 `2024Q3` 之後的季度啟用 historical resolver；系統會先查 `EMOPS historical` 歷史公告，再 fallback `Yahoo 股市行事曆` 的 `相關訊息` 季度字樣；支援英文季度與民國年 / 中文季度別名。若仍無法確認同一季度，才保留原輸入並標記 `unverified`
 - `expectation_analysis.py` 保留為 module-level capability，但不納入目前主流程承諾
+- query-first 的新聞掃描入口目前已下架；若未來要擴充，建議以獨立附屬工具重建，不要混入 event-first 主流程

@@ -1,6 +1,9 @@
 """CLI entry point for VICI2 Taiwan Earnings Call Narrative & Heat Analysis Engine.
 
 Usage:
+    # Chat mode
+    python main.py --mode chat
+
     # Event collect mode
     python main.py --mode event_collect --stock 2330.TW \
         --event-type 法說會 --start-date 2025-04-01 --end-date 2025-04-17 \
@@ -20,8 +23,6 @@ Usage:
     python main.py --mode event_study --stock 2330.TW \\
         --event-dates 2025-01-16,2025-04-17 --topic "TSMC法說會"
 
-    # News Scan mode (experimental / legacy)
-    python main.py --mode news_scan --query "央行升息" --days 30
 """
 
 import argparse
@@ -41,7 +42,7 @@ def main():
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["event_collect", "heat_scan", "event_report", "event_study", "news_scan"],
+        choices=["chat", "event_collect", "heat_scan", "event_report", "event_study"],
         help="Operation mode",
     )
     # event_collect args
@@ -68,16 +69,16 @@ def main():
     parser.add_argument("--stock", help="Yahoo Finance symbol, e.g. '2330.TW' (required for formal modes)")
     parser.add_argument("--event-dates", help="Comma-separated event dates YYYY-MM-DD (required for event_study)")
     parser.add_argument("--topic", default="台灣法說會事件", help="Report topic (used in report filename)")
-    # news_scan args
-    parser.add_argument("--query", help="News search keywords (required for experimental news_scan)")
-    parser.add_argument("--days", type=int, default=30, help="Look-back days for experimental news_scan (default: 30)")
-
     args = parser.parse_args()
 
-    from agent import event_study, news_scan
+    from agent import event_study
+    from chat_cli import run_chat_mode
     from pipeline import event_collect, event_report, heat_scan
 
-    if args.mode == "event_collect":
+    if args.mode == "chat":
+        run_chat_mode()
+
+    elif args.mode == "event_collect":
         if not args.stock:
             parser.error("--stock is required for event_collect mode")
         if not args.event_type:
@@ -164,18 +165,6 @@ def main():
         else:
             print("\n⚠ Analysis completed but no report was saved.")
             sys.exit(1)
-
-    elif args.mode == "news_scan":
-        if not args.query:
-            parser.error("--query is required for news_scan mode")
-
-        report_path = news_scan(query=args.query, days=args.days)
-        if report_path:
-            print(f"\n✓ Report saved: {report_path}")
-        else:
-            print("\n⚠ Scan completed but no report was saved.")
-            sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

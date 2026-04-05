@@ -1,8 +1,7 @@
-"""LLM Orchestrator: Gemini tool-use loop for experimental LLM-driven modes.
+"""Event study LLM adapter.
 
-Handles event_study and news_scan modes. These are retained as experimental
-or optional paths, while the deterministic primary workflow
-(event_collect, heat_scan, event_report) lives in pipeline.py.
+This module only serves the optional ``event_study`` mode. The deterministic
+primary workflow (event_collect, heat_scan, event_report) lives in pipeline.py.
 
 Provider: Google Gemini (configured via GEMINI_API_KEY in .env).
 """
@@ -27,7 +26,7 @@ from tools.stock_data import fetch_stock_data
 # Tool definitions (provider-agnostic JSON schema)
 # ---------------------------------------------------------------------------
 
-TOOLS = [
+EVENT_STUDY_TOOLS = [
     {
         "name": "scrape_news",
         "description": (
@@ -205,8 +204,8 @@ TOOLS = [
 # Tool executor
 # ---------------------------------------------------------------------------
 
-def execute_tool(name: str, inputs: dict) -> str:
-    """Execute a tool call and return the result as a string."""
+def _execute_event_study_tool(name: str, inputs: dict) -> str:
+    """Execute an event-study helper tool call and return the result."""
     if name == "scrape_news":
         try:
             articles = search_news(
@@ -379,7 +378,7 @@ def _run_gemini_loop(
         for fc in function_calls:
             tool_inputs = dict(fc.args)
             print(f"  → {fc.name}({list(tool_inputs.keys())})")
-            result = execute_tool(fc.name, tool_inputs)
+            result = _execute_event_study_tool(fc.name, tool_inputs)
 
             if fc.name == "save_report":
                 report_path = result
@@ -415,7 +414,7 @@ def _run_event_study_gemini(
             description=t["description"],
             parameters=_to_gemini_schema(t["input_schema"]),
         )
-        for t in TOOLS
+        for t in EVENT_STUDY_TOOLS
     ]
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
@@ -442,40 +441,6 @@ def _run_event_study_gemini(
 
     contents = [types.Content(role="user", parts=[types.Part(text=user_message)])]
     return _run_gemini_loop(client, model_id, contents, config, retry_nudge="請繼續下一步。", verbose_empty=True)
-
-
-def _run_news_scan_gemini(query: str, days: int, system_prompt: str) -> Optional[str]:
-    import google.genai as genai
-    from google.genai import types
-
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    model_id = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-
-    function_declarations = [
-        types.FunctionDeclaration(
-            name=t["name"],
-            description=t["description"],
-            parameters=_to_gemini_schema(t["input_schema"]),
-        )
-        for t in TOOLS
-    ]
-    config = types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        tools=[types.Tool(function_declarations=function_declarations)],
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
-    )
-
-    date_from = (date.today() - timedelta(days=days)).isoformat()
-    user_message = (
-        f"今天日期：{date.today().isoformat()}\n\n"
-        f"請搜尋以下關鍵字的近期台灣財經新聞並進行情緒分析：\n\n"
-        f"- **搜尋關鍵字**：{query}\n"
-        f"- **搜尋範圍**：{date_from} 到今天\n\n"
-        f"執行 News Scan 模式：搜尋新聞 → 取得前 5 篇完整內容 → 情緒分析 → 儲存摘要報告。"
-    )
-
-    contents = [types.Content(role="user", parts=[types.Part(text=user_message)])]
-    return _run_gemini_loop(client, model_id, contents, config, retry_nudge="請繼續。", verbose_empty=False)
 
 
 # ---------------------------------------------------------------------------
@@ -505,27 +470,3 @@ def event_study(stock: str, event_dates: list[str], topic: str) -> str:
     print()
 
     return _run_event_study_gemini(stock, event_dates, topic, system_prompt)
-
-
-def news_scan(query: str, days: int = 30) -> str:
-    """Scan recent Taiwan financial news for a topic and analyze sentiment.
-
-    Args:
-        query: Search keywords
-        days: Look-back period in days (default 30)
-
-    Returns:
-        Path to the saved report file.
-    """
-    if not os.environ.get("GEMINI_API_KEY"):
-        raise ValueError("GEMINI_API_KEY not set. Add it to your .env file.")
-
-    system_prompt = _load_system_prompt()
-
-    print(f"[agent] mode: news_scan")
-    print(f"[agent] query: {query}")
-    print(f"[agent] days: {days}")
-    print()
-
-    return _run_news_scan_gemini(query, days, system_prompt)
-

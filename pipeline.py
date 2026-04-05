@@ -4,7 +4,7 @@ These functions run structured, step-by-step workflows without going through
 the LLM tool-use loop. Each function calls the relevant tool modules directly
 and produces JSON / Markdown outputs.
 
-LLM-driven experimental modes (event_study, news_scan) remain in agent.py.
+This module is the project's primary execution path.
 """
 
 from __future__ import annotations
